@@ -2,7 +2,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL = "gemini-1.5-flash";
+/* STREAMING_CHUNK:Updating model to gemini-2.5-flash... */
+const TEXT_MODEL = "gemini-2.5-flash"; 
 const MAX_PASTE_CHARS = 12000;
 
 const GenerateInput = z.object({
@@ -44,6 +45,7 @@ export type SlideDeck = {
   slides: SlideSpec[];
 };
 
+/* STREAMING_CHUNK:Initializing constants and helper functions... */
 const MAX_BULLETS = 6;
 const MAX_BULLET_CHARS = 100;
 const MAX_SECTIONS = 4;
@@ -71,7 +73,8 @@ function clampSlide(spec: SlideSpec): SlideSpec {
 }
 
 function extractJson(text: string): Record<string, unknown> {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const fenced = text.match(/
+```(?:json)?\s*([\s\S]*?)```/);
   const raw = (fenced ? fenced[1] : text).trim();
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
@@ -79,7 +82,6 @@ function extractJson(text: string): Record<string, unknown> {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-// Fixed: Added the missing error handler function
 async function handleGeminiErrors(res: Response) {
   if (!res.ok) {
     const t = await res.text().catch(() => "");
@@ -112,18 +114,41 @@ async function callGemini(sys: string, userMsg: string, retries = 3) {
   throw new Error("Rate limit exceeded after retries.");
 }
 
-const SCHEMA_HINT = `Return STRICT JSON of this shape: { "topic": "...", "slides": [...] }`;
+/* STREAMING_CHUNK:Defining schema and server actions... */
+const SCHEMA_HINT = `Return STRICT JSON of this shape:
+{
+  "topic": "short topic title",
+  "courseName": "...", "courseCode": "...", "courseLevel": "...", "creditUnits": "...", "contactTime": "...",
+  "slides": [
+    {
+      "type": "title" | "identification" | "content" | "list" | "takeaway",
+      "title": "SHORT ALL-CAPS TITLE (<=6 words)",
+      "subtitle": "optional italic tagline",
+      "body": "optional 1-2 SHORT sentences, max 40 words total",
+      "bullets": ["at most 5 bullets, each <=10 words"],
+      "sections": [{"heading":"Sub-heading (<=5 words)","description":"<=16 words"}],
+      "illustrationPrompt": "concise prompt for a clean flat vector illustration (no text, no logos)"
+    }
+  ]
+}
+Rules:
+- Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
+- At most 4 sections OR 5 bullets per slide (never both on the same slide).
+- Slide 1 MUST be type "title", Slide 2 MUST be type "identification", Final slide MUST be type "takeaway".
+- Every slide MUST have a non-empty illustrationPrompt.
+- Output JSON only.`;
 
 export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
-    const sys = `You are a curriculum designer... ${SCHEMA_HINT}`;
-    const userMsg = "..."; // (Your prompt logic here)
+    const sys = `You are a curriculum designer. ${SCHEMA_HINT}`;
+    const userMsg = data.mode === "paste"
+        ? `Turn raw course material into a ${data.slideCount}-slide deck.\n\nRAW MATERIAL:\n${data.pastedContent}\n\nGUIDANCE: ${data.extraNotes || "(none)"}`
+        : `Design a ${data.slideCount}-slide deck for topic: ${data.topic}`;
 
     const res = await callGemini(sys, userMsg);
     await handleGeminiErrors(res);
-    
-    const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+    const json = (await res.json()) as any;
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
     const parsed = extractJson(text) as any;
     
@@ -143,36 +168,43 @@ export const generateDeck = createServerFn({ method: "POST" })
 export const regenerateSlide = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.any().parse(data))
   .handler(async ({ data }) => {
-    const sys = `...`; 
-    const res = await callGemini(sys, "...");
+    const sys = `You are a curriculum designer. Write ONE replacement slide of type "${data.slideType}". ${SCHEMA_HINT}`;
+    const res = await callGemini(sys, `Write alternative: ${data.currentTitle}`);
     await handleGeminiErrors(res);
-    // ... (rest of logic)
-    return { slide: clampSlide({ ...data, type: data.slideType }) };
+    const json = (await res.json()) as any;
+    const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const parsed = extractJson(text) as any;
+    const slide = parsed.slides?.[0];
+    if (!slide) throw new Error("Model returned no slide");
+    return { slide: clampSlide({ ...slide, type: data.slideType }) };
   });
+
+/* STREAMING_CHUNK:Implementing illustration generation with retries... */
+const IllustrationInput = z.object({ prompt: z.string().min(2) });
 
 export const generateIllustration = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => IllustrationInput.parse(data))
   .handler(async ({ data }) => {
-    const styled = `...`;
+    const styled = `Minimal flat vector illustration, ${data.prompt}`;
     
-    // Fixed: Added retry logic for illustration requests
     let retries = 3;
-    let res;
-    while(retries > 0) {
-      res = await fetch(`https://image.pollinations.ai/prompt/${encodeURIComponent(styled)}?seed=${Math.random()}`);
+    while (retries > 0) {
+      const seed = Math.floor(Math.random() * 1_000_000);
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(styled)}?width=800&height=800&seed=${seed}&nologo=true`;
+      const res = await fetch(url);
+      
       if (res.status === 429) {
         await new Promise(r => setTimeout(r, 2000));
         retries--;
         continue;
       }
-      break;
+      
+      if (!res.ok) throw new Error("Image generation failed.");
+      
+      const arrayBuffer = await res.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString("base64");
+      return { dataUrl: `data:image/jpeg;base64,${base64}` };
     }
-
-    if (!res || !res.ok) throw new Error("Image generation failed.");
-    
-    const arrayBuffer = await res.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
-    return { dataUrl: `data:image/jpeg;base64,${base64}` };
+    throw new Error("Rate limit exceeded for image generation.");
   });
-
-const IllustrationInput = z.object({ prompt: z.string().min(2) });
+```eof
