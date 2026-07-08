@@ -5,6 +5,13 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TEXT_MODEL = "gemini-3.5-flash"; 
 const MAX_PASTE_CHARS = 12000;
 
+// Schema representing student interaction feedback to continuous adaptation loop
+const FeedbackItem = z.object({
+  rating: z.number().min(1).max(5),
+  topic: z.string(),
+  successfulTraits: z.array(z.string()), // e.g. ["high-density", "bullet-minimal", "visual-heavy"]
+});
+
 const GenerateInput = z.object({
   mode: z.enum(["brief", "paste"]).default("brief"),
   topic: z.string().optional().default(""),
@@ -22,6 +29,7 @@ const GenerateInput = z.object({
   contactTime: z.string().optional().default(""),
   slideCount: z.number().int().min(4).max(24).default(10),
   extraNotes: z.string().optional().default(""),
+  feedbackHistory: z.array(FeedbackItem).optional().default([]), // The machine learning feedback loop input
 });
 
 export type SlideSpec = {
@@ -41,6 +49,7 @@ export type SlideDeck = {
   creditUnits: string;
   contactTime: string;
   topic: string;
+  exportFilename: string; // Automated generated safe filename
   slides: SlideSpec[];
 };
 
@@ -113,14 +122,18 @@ async function callGemini(sys: string, userMsg: string, retries = 3) {
 
 const SCHEMA_HINT = `Return STRICT JSON of this shape:
 {
-  "topic": "short topic title",
-  "courseName": "...", "courseCode": "...", "courseLevel": "...", "creditUnits": "...", "contactTime": "...",
+  "topic": "extracted short topic title",
+  "courseName": "extracted course name", 
+  "courseCode": "extracted course ID/code", 
+  "courseLevel": "extracted level", 
+  "creditUnits": "extracted credits", 
+  "contactTime": "extracted contact time",
   "slides": [
     {
       "type": "title" | "identification" | "content" | "list" | "takeaway",
       "title": "SHORT ALL-CAPS TITLE (<=6 words)",
       "subtitle": "optional italic tagline",
-      "body": "optional 1-2 SHORT sentences, max 40 words total",
+      "body": "optional sentences describing core context",
       "bullets": ["at most 5 bullets, each <=10 words"],
       "sections": [{"heading":"Sub-heading (<=5 words)","description":"<=16 words"}],
       "illustrationPrompt": "concise prompt for a clean flat vector illustration (no text, no logos)"
@@ -128,18 +141,41 @@ const SCHEMA_HINT = `Return STRICT JSON of this shape:
   ]
 }
 Rules:
-- Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
+- Slide 1 MUST be type "title", populated with Course ID, Topic, and Course Name.
+- Slide 2 MUST be type "identification" or "content", designed as a "Topic Overview" slide containing deep, prescribed details of the topic extracted from raw input to capture full contextual framework.
+- Every slide's content MUST fit cleanly on a single slide layout.
 - At most 4 sections OR 5 bullets per slide (never both on the same slide).
-- Slide 1 MUST be type "title", Slide 2 MUST be type "identification", Final slide MUST be type "takeaway".
-- Every slide MUST have a non-empty illustrationPrompt.
+- Final slide MUST be type "takeaway".
 - Output JSON only.`;
 
 export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
-    const sys = `You are a curriculum designer. ${SCHEMA_HINT}`;
+    // 1. Build Adaptive ML Instructions from past feedback metrics
+    let mlLayoutDirectives = "";
+    if (data.feedbackHistory && data.feedbackHistory.length > 0) {
+      const highlyRated = data.feedbackHistory.filter(f => f.rating >= 4);
+      if (highlyRated.length > 0) {
+        const preferredTraits = Array.from(new Set(highlyRated.flatMap(h => h.successfulTraits)));
+        mlLayoutDirectives = `
+[ADAPTATION ENGINE RULES]:
+Based on verified past successful generations, apply these user-preferred structural traits:
+- Strongly prioritize layout patterns matching: ${preferredTraits.join(", ")}.
+- Optimize density, readability levels, and bullet configurations according to success profiles.
+`;
+      }
+    }
+
+    const sys = `You are an expert curriculum systems architect. Analyze input hierarchies, extract metadata, and compile high-quality student educational content. ${SCHEMA_HINT} ${mlLayoutDirectives}`;
+    
     const userMsg = data.mode === "paste"
-        ? `Turn raw course material into a ${data.slideCount}-slide deck.\n\nRAW MATERIAL:\n${data.pastedContent}\n\nGUIDANCE: ${data.extraNotes || "(none)"}`
+        ? `Task: Extract hierarchical course metrics and build a ${data.slideCount}-slide deck.
+           Analyze the text structure to pull Course Code/ID, Course Name, Topic, and metadata.
+           
+           RAW MATERIAL:
+           ${data.pastedContent}
+           
+           ADDITIONAL GUIDANCE: ${data.extraNotes || "(none)"}`
         : `Design a ${data.slideCount}-slide deck for topic: ${data.topic}`;
 
     const res = await callGemini(sys, userMsg);
@@ -150,13 +186,26 @@ export const generateDeck = createServerFn({ method: "POST" })
     
     if (!parsed.slides?.length) throw new Error("Model returned no slides");
 
+    // 2. Fallback Protection and Strict File Naming Synthesizer
+    const timestamp = Date.now();
+    const finalCourseCode = (data.courseCode || parsed.courseCode || "").trim() || `MissingCourseID_${timestamp}`;
+    const finalTopic = (data.topic || parsed.topic || "").trim() || `MissingTopic_${timestamp}`;
+    const finalCourseName = (data.courseName || parsed.courseName || "").trim() || `MissingCourseName_${timestamp}`;
+
+    // Apply strict naming formatting: [Course ID][Topic][Course Name]
+    const rawFilename = `[${finalCourseCode}][${finalTopic}][${finalCourseName}]`;
+    const exportFilename = rawFilename
+      .replace(/[/\\?%*:|"<>]/g, "-") // Sanitize OS filesystem hostile symbols
+      .replace(/\s+/g, "_"); // Streamline whitespace to flat snake notation
+
     return {
-      courseName: data.courseName || parsed.courseName || "",
-      courseCode: data.courseCode || parsed.courseCode || "",
+      courseName: data.courseName || parsed.courseName || "General Course",
+      courseCode: data.courseCode || parsed.courseCode || "GEN-101",
       courseLevel: data.courseLevel || parsed.courseLevel || "",
       creditUnits: data.creditUnits || parsed.creditUnits || "",
       contactTime: data.contactTime || parsed.contactTime || "",
-      topic: data.topic || parsed.topic || "Untitled Lecture",
+      topic: data.topic || parsed.topic || "Topic Overview",
+      exportFilename,
       slides: parsed.slides.map(clampSlide),
     };
   });
