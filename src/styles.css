@@ -54,6 +54,14 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow-x: hidden;
+  }
+  /* iOS Safari auto-zooms into any input/textarea with font-size below 16px on focus.
+     Force 16px on phones so tapping a field doesn't jump-zoom the whole page. */
+  @media (max-width: 640px) {
+    input, textarea, select {
+      font-size: 16px;
+    }
   }
 }
 
