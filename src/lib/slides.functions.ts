@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL = "gemini-2.5-flash";
+const TEXT_MODEL = "gemini-1.5-flash";
 const MAX_PASTE_CHARS = 12000;
 
 const GenerateInput = z.object({
@@ -79,38 +79,29 @@ function extractJson(text: string): Record<string, unknown> {
   if (start === -1 || end === -1) throw new Error("No JSON object in model response");
   return JSON.parse(raw.slice(start, end + 1));
 }
-
-function callGemini(sys: string, userMsg: string) {
+async function callGemini(sys: string, userMsg: string, retries = 3) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
-  return fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent`,
-    {
+
+  for (let i = 0; i < retries; i++) {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent`, {
       method: "POST",
-      headers: {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json",
-      },
+      headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: sys }] },
-          { role: "user", parts: [{ text: userMsg }] },
-        ],
-        generationConfig: {
-          responseMimeType: "application/json",
-        },
+        contents: [{ role: "user", parts: [{ text: sys }, { text: userMsg }] }],
+        generationConfig: { responseMimeType: "application/json" },
       }),
+    });
+
+    if (res.status === 429) {
+      const waitTime = Math.pow(2, i) * 2000;
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      continue;
     }
-  );
+    return res;
+  }
+  throw new Error("Rate limit exceeded after retries.");
 }
 
-async function handleGeminiErrors(res: Response) {
-  if (!res.ok) {
-    const t = await res.text();
-    if (res.status === 429) throw new Error("Rate limit — please wait a moment and try again.");
-    if (res.status === 403) throw new Error("Invalid GEMINI_API_KEY or insufficient permissions.");
-    throw new Error(`AI error ${res.status}: ${t}`);
-  }
-}
 
 const SCHEMA_HINT = `Return STRICT JSON of this shape:
 {
