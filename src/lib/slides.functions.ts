@@ -3,7 +3,6 @@ import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TEXT_MODEL = "gemini-2.5-flash";
-const IMAGE_MODEL = "gemini-2.5-flash-image";
 
 const GenerateInput = z.object({
   mode: z.enum(["brief", "paste"]).default("brief"),
@@ -138,40 +137,21 @@ const IllustrationInput = z.object({ prompt: z.string().min(2) });
 export const generateIllustration = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => IllustrationInput.parse(data))
   .handler(async ({ data }) => {
-    if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
-
     const styled = `Minimal flat vector illustration, educational, professional, clean white background, muted green (#0F7A3A) and red (#C8102E) accent palette, no text, no letters, no logos, no watermarks. Subject: ${data.prompt}`;
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "x-goog-api-key": GEMINI_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: styled }] }],
-          generationConfig: {
-            responseModalities: ["TEXT", "IMAGE"],
-          },
-        }),
-      }
-    );
+    // Pollinations.ai — free, no API key, no billing required.
+    const seed = Math.floor(Math.random() * 1_000_000);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(styled)}?width=800&height=800&seed=${seed}&nologo=true`;
 
+    const res = await fetch(url);
     if (!res.ok) {
-      const t = await res.text();
+      const t = await res.text().catch(() => "");
       if (res.status === 429) throw new Error("Rate limit — please wait a moment and try again.");
-      if (res.status === 403) throw new Error("Invalid GEMINI_API_KEY or insufficient permissions.");
       throw new Error(`Image error ${res.status}: ${t}`);
     }
 
-    const json = (await res.json()) as {
-      candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[];
-    };
-    const parts = json.candidates?.[0]?.content?.parts ?? [];
-    const imagePart = parts.find((p) => p.inlineData?.data);
-    if (!imagePart?.inlineData?.data) throw new Error("No image returned");
-    const mimeType = imagePart.inlineData.mimeType || "image/png";
-    return { dataUrl: `data:${mimeType};base64,${imagePart.inlineData.data}` };
+    const arrayBuffer = await res.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString("base64");
+    const mimeType = res.headers.get("content-type") || "image/jpeg";
+    return { dataUrl: `data:${mimeType};base64,${base64}` };
   });
