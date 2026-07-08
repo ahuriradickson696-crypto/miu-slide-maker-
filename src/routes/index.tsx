@@ -49,6 +49,7 @@ function StudioPage() {
       toast.success(`Outline ready — ${d.slides.length} slides`);
 
       const images: Illus = new Array(d.slides.length).fill(null);
+      let failCount = 0;
       for (let i = 0; i < d.slides.length; i++) {
         try {
           const { dataUrl } = await generateIllustration({
@@ -56,13 +57,20 @@ function StudioPage() {
           });
           images[i] = dataUrl;
         } catch (e) {
+          failCount++;
           console.error("illus fail", i, e);
         }
         setIllus([...images]);
         setProgress(Math.round(((i + 1) / d.slides.length) * 100));
       }
       setPhase("done");
-      toast.success("All illustrations rendered");
+      if (failCount === 0) {
+        toast.success("All illustrations rendered");
+      } else if (failCount < d.slides.length) {
+        toast.warning(`${failCount} of ${d.slides.length} illustrations failed — check console for details`);
+      } else {
+        toast.error("All illustrations failed to generate — check console for details");
+      }
     } catch (e) {
       console.error(e);
       toast.error(e instanceof Error ? e.message : "Generation failed");
