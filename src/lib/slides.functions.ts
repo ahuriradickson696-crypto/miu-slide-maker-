@@ -5,12 +5,90 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TEXT_MODEL = "gemini-3.5-flash"; 
 const MAX_PASTE_CHARS = 12000;
 
-// Schema representing student interaction feedback to continuous adaptation loop
-const FeedbackItem = z.object({
-  rating: z.number().min(1).max(5),
-  topic: z.string(),
-  successfulTraits: z.array(z.string()), // e.g. ["high-density", "bullet-minimal", "visual-heavy"]
-});
+// The OpenAPI Schema is passed directly to the Gemini API to guarantee perfect JSON responses.
+const DECK_SCHEMA = {
+  type: "object",
+  properties: {
+    topic: { type: "string" },
+    courseName: { type: "string" },
+    courseCode: { type: "string" },
+    courseLevel: { type: "string" },
+    creditUnits: { type: "string" },
+    contactTime: { type: "string" },
+    slides: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: ["title", "identification", "content", "list", "takeaway"]
+          },
+          title: { type: "string" },
+          subtitle: { type: "string" },
+          body: { type: "string" },
+          bullets: {
+            type: "array",
+            items: { type: "string" }
+          },
+          sections: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                heading: { type: "string" },
+                description: { type: "string" }
+              },
+              required: ["heading", "description"]
+            }
+          },
+          illustrationPrompt: { type: "string" }
+        },
+        required: ["type", "title", "illustrationPrompt"]
+      }
+    }
+  },
+  required: ["topic", "slides"]
+};
+
+const REGENERATE_SCHEMA = {
+  type: "object",
+  properties: {
+    slides: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: ["title", "identification", "content", "list", "takeaway"]
+          },
+          title: { type: "string" },
+          subtitle: { type: "string" },
+          body: { type: "string" },
+          bullets: {
+            type: "array",
+            items: { type: "string" }
+          },
+          sections: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                heading: { type: "string" },
+                description: { type: "string" }
+              },
+              required: ["heading", "description"]
+            }
+          },
+          illustrationPrompt: { type: "string" }
+        },
+        required: ["type", "title", "illustrationPrompt"]
+      }
+    }
+  },
+  required: ["slides"]
+};
 
 const GenerateInput = z.object({
   mode: z.enum(["brief", "paste"]).default("brief"),
@@ -29,7 +107,6 @@ const GenerateInput = z.object({
   contactTime: z.string().optional().default(""),
   slideCount: z.number().int().min(4).max(24).default(10),
   extraNotes: z.string().optional().default(""),
-  feedbackHistory: z.array(FeedbackItem).optional().default([]), // The machine learning feedback loop input
 });
 
 export type SlideSpec = {
@@ -49,7 +126,6 @@ export type SlideDeck = {
   creditUnits: string;
   contactTime: string;
   topic: string;
-  exportFilename: string; // Automated generated safe filename
   slides: SlideSpec[];
 };
 
@@ -80,12 +156,18 @@ function clampSlide(spec: SlideSpec): SlideSpec {
 }
 
 function extractJson(text: string): Record<string, unknown> {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const raw = (fenced ? fenced[1] : text).trim();
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON object in model response");
-  return JSON.parse(raw.slice(start, end + 1));
+  try {
+    // Attempt parsing directly first (optimal for raw JSON API modes)
+    return JSON.parse(text.trim());
+  } catch (err) {
+    // If the response somehow contains markdown markers or other trailing texts
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = (fenced ? fenced[1] : text).trim();
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start === -1 || end === -1) throw new Error("No JSON object in model response");
+    return JSON.parse(raw.slice(start, end + 1));
+  }
 }
 
 async function handleGeminiErrors(res: Response) {
@@ -97,7 +179,7 @@ async function handleGeminiErrors(res: Response) {
   }
 }
 
-async function callGemini(sys: string, userMsg: string, retries = 3) {
+async function callGemini(sys: string, userMsg: string, retries = 3, schema?: any) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
   for (let i = 0; i < retries; i++) {
@@ -105,8 +187,15 @@ async function callGemini(sys: string, userMsg: string, retries = 3) {
       method: "POST",
       headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: sys }, { text: userMsg }] }],
-        generationConfig: { responseMimeType: "application/json" },
+        contents: [{ role: "user", parts: [{ text: userMsg }] }],
+        system_instruction: {
+          parts: [{ text: sys }]
+        },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+          maxOutputTokens: 8192 // Generous output budget to completely prevent truncation
+        },
       }),
     });
 
@@ -120,65 +209,22 @@ async function callGemini(sys: string, userMsg: string, retries = 3) {
   throw new Error("Rate limit exceeded after retries.");
 }
 
-const SCHEMA_HINT = `Return STRICT JSON of this shape:
-{
-  "topic": "extracted short topic title",
-  "courseName": "extracted course name", 
-  "courseCode": "extracted course ID/code", 
-  "courseLevel": "extracted level", 
-  "creditUnits": "extracted credits", 
-  "contactTime": "extracted contact time",
-  "slides": [
-    {
-      "type": "title" | "identification" | "content" | "list" | "takeaway",
-      "title": "SHORT ALL-CAPS TITLE (<=6 words)",
-      "subtitle": "optional italic tagline",
-      "body": "optional sentences describing core context",
-      "bullets": ["at most 5 bullets, each <=10 words"],
-      "sections": [{"heading":"Sub-heading (<=5 words)","description":"<=16 words"}],
-      "illustrationPrompt": "concise prompt for a clean flat vector illustration (no text, no logos)"
-    }
-  ]
-}
+const SCHEMA_HINT = `Return STRICT JSON conforming to the schema.
 Rules:
-- Slide 1 MUST be type "title", populated with Course ID, Topic, and Course Name.
-- Slide 2 MUST be type "identification" or "content", designed as a "Topic Overview" slide containing deep, prescribed details of the topic extracted from raw input to capture full contextual framework.
-- Every slide's content MUST fit cleanly on a single slide layout.
+- Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
 - At most 4 sections OR 5 bullets per slide (never both on the same slide).
-- Final slide MUST be type "takeaway".
-- Output JSON only.`;
+- Slide 1 MUST be type "title", Slide 2 MUST be type "identification", Final slide MUST be type "takeaway".
+- Every slide MUST have a non-empty illustrationPrompt.`;
 
 export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
-    // 1. Build Adaptive ML Instructions from past feedback metrics
-    let mlLayoutDirectives = "";
-    if (data.feedbackHistory && data.feedbackHistory.length > 0) {
-      const highlyRated = data.feedbackHistory.filter(f => f.rating >= 4);
-      if (highlyRated.length > 0) {
-        const preferredTraits = Array.from(new Set(highlyRated.flatMap(h => h.successfulTraits)));
-        mlLayoutDirectives = `
-[ADAPTATION ENGINE RULES]:
-Based on verified past successful generations, apply these user-preferred structural traits:
-- Strongly prioritize layout patterns matching: ${preferredTraits.join(", ")}.
-- Optimize density, readability levels, and bullet configurations according to success profiles.
-`;
-      }
-    }
-
-    const sys = `You are an expert curriculum systems architect. Analyze input hierarchies, extract metadata, and compile high-quality student educational content. ${SCHEMA_HINT} ${mlLayoutDirectives}`;
-    
+    const sys = `You are a curriculum designer. ${SCHEMA_HINT}`;
     const userMsg = data.mode === "paste"
-        ? `Task: Extract hierarchical course metrics and build a ${data.slideCount}-slide deck.
-           Analyze the text structure to pull Course Code/ID, Course Name, Topic, and metadata.
-           
-           RAW MATERIAL:
-           ${data.pastedContent}
-           
-           ADDITIONAL GUIDANCE: ${data.extraNotes || "(none)"}`
+        ? `Turn raw course material into a ${data.slideCount}-slide deck.\n\nRAW MATERIAL:\n${data.pastedContent}\n\nGUIDANCE: ${data.extraNotes || "(none)"}`
         : `Design a ${data.slideCount}-slide deck for topic: ${data.topic}`;
 
-    const res = await callGemini(sys, userMsg);
+    const res = await callGemini(sys, userMsg, 3, DECK_SCHEMA);
     await handleGeminiErrors(res);
     const json = (await res.json()) as any;
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
@@ -186,26 +232,13 @@ Based on verified past successful generations, apply these user-preferred struct
     
     if (!parsed.slides?.length) throw new Error("Model returned no slides");
 
-    // 2. Fallback Protection and Strict File Naming Synthesizer
-    const timestamp = Date.now();
-    const finalCourseCode = (data.courseCode || parsed.courseCode || "").trim() || `MissingCourseID_${timestamp}`;
-    const finalTopic = (data.topic || parsed.topic || "").trim() || `MissingTopic_${timestamp}`;
-    const finalCourseName = (data.courseName || parsed.courseName || "").trim() || `MissingCourseName_${timestamp}`;
-
-    // Apply strict naming formatting: [Course ID][Topic][Course Name]
-    const rawFilename = `[${finalCourseCode}][${finalTopic}][${finalCourseName}]`;
-    const exportFilename = rawFilename
-      .replace(/[/\\?%*:|"<>]/g, "-") // Sanitize OS filesystem hostile symbols
-      .replace(/\s+/g, "_"); // Streamline whitespace to flat snake notation
-
     return {
-      courseName: data.courseName || parsed.courseName || "General Course",
-      courseCode: data.courseCode || parsed.courseCode || "GEN-101",
+      courseName: data.courseName || parsed.courseName || "",
+      courseCode: data.courseCode || parsed.courseCode || "",
       courseLevel: data.courseLevel || parsed.courseLevel || "",
       creditUnits: data.creditUnits || parsed.creditUnits || "",
       contactTime: data.contactTime || parsed.contactTime || "",
-      topic: data.topic || parsed.topic || "Topic Overview",
-      exportFilename,
+      topic: data.topic || parsed.topic || "Untitled Lecture",
       slides: parsed.slides.map(clampSlide),
     };
   });
@@ -214,7 +247,7 @@ export const regenerateSlide = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.any().parse(data))
   .handler(async ({ data }) => {
     const sys = `You are a curriculum designer. Write ONE replacement slide of type "${data.slideType}". ${SCHEMA_HINT}`;
-    const res = await callGemini(sys, `Write alternative: ${data.currentTitle}`);
+    const res = await callGemini(sys, `Write alternative: ${data.currentTitle}`, 3, REGENERATE_SCHEMA);
     await handleGeminiErrors(res);
     const json = (await res.json()) as any;
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
