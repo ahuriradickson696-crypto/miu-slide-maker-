@@ -2,8 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-/* STREAMING_CHUNK:Setting stable model identifier... */
-const TEXT_MODEL = "gemini-1.5-flash"; 
+const TEXT_MODEL = "gemini-3.5-flash"; 
 const MAX_PASTE_CHARS = 12000;
 
 const GenerateInput = z.object({
@@ -45,7 +44,6 @@ export type SlideDeck = {
   slides: SlideSpec[];
 };
 
-/* STREAMING_CHUNK:Initializing helper functions... */
 const MAX_BULLETS = 6;
 const MAX_BULLET_CHARS = 100;
 const MAX_SECTIONS = 4;
@@ -73,8 +71,7 @@ function clampSlide(spec: SlideSpec): SlideSpec {
 }
 
 function extractJson(text: string): Record<string, unknown> {
-  const fenced = text.match(/
-```(?:json)?\s*([\s\S]*?)```/);
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = (fenced ? fenced[1] : text).trim();
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
@@ -114,7 +111,6 @@ async function callGemini(sys: string, userMsg: string, retries = 3) {
   throw new Error("Rate limit exceeded after retries.");
 }
 
-/* STREAMING_CHUNK:Defining generation logic... */
 const SCHEMA_HINT = `Return STRICT JSON of this shape:
 {
   "topic": "short topic title",
@@ -179,7 +175,6 @@ export const regenerateSlide = createServerFn({ method: "POST" })
     return { slide: clampSlide({ ...slide, type: data.slideType }) };
   });
 
-/* STREAMING_CHUNK:Implementing illustration generation... */
 const IllustrationInput = z.object({ prompt: z.string().min(2) });
 
 export const generateIllustration = createServerFn({ method: "POST" })
@@ -207,4 +202,3 @@ export const generateIllustration = createServerFn({ method: "POST" })
     }
     throw new Error("Rate limit exceeded for image generation.");
   });
-```eof
