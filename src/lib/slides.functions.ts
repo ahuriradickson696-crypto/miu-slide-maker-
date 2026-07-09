@@ -60,12 +60,12 @@ export type SlideDeck = {
   slides: SlideSpec[];
 };
 
-// ---------- Content clamping (protects layout) ----------
+// ---------- Tight Content Clamping (Prevents Layout Overflows) ----------
 
-const MAX_BULLETS = 6;
-const MAX_BULLET_CHARS = 100;
-const MAX_BODY_CHARS = 320;
-const MAX_TITLE_CHARS = 70;
+const MAX_BULLETS = 4;        // Reduced from 6 to 4 to prevent vertical footer overlaps
+const MAX_BULLET_CHARS = 75;  // Reduced from 100 to 75 to keep bullet points on single/double lines
+const MAX_BODY_CHARS = 180;   // Reduced from 320 to 180 for super punchy content
+const MAX_TITLE_CHARS = 55;   // Reduced from 70 to 55 to prevent double-line title wrapping issues
 
 function clamp(text: string, max: number): string {
   const t = (text ?? "").toString().trim();
@@ -99,12 +99,12 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
     .filter(
       (s) => typeof s.heading === "string" || typeof s.description === "string",
     )
-    .slice(0, 4)
+    .slice(0, 3) // Safely clamped to at most 3 sections
     .map((s) => ({
-      heading: clamp(typeof s.heading === "string" ? s.heading : "", 45),
+      heading: clamp(typeof s.heading === "string" ? s.heading : "", 35),
       description: clamp(
         typeof s.description === "string" ? s.description : "",
-        150,
+        100, // Reduced from 150 to 100 to protect grids
       ),
     }));
 
@@ -113,7 +113,7 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
     title: clamp(typeof spec.title === "string" ? spec.title : "", MAX_TITLE_CHARS),
     subtitle:
       typeof spec.subtitle === "string" && spec.subtitle.trim()
-        ? clamp(spec.subtitle, 100)
+        ? clamp(spec.subtitle, 80)
         : undefined,
     body:
       typeof spec.body === "string" && spec.body.trim()
@@ -181,36 +181,25 @@ function buildPrompt(data: GenerateInputT): string {
     .filter(Boolean)
     .join("\n");
 
-  const shared = `You are building a university lecture slide deck for Metropolitan
-International University (MIU). Return ONLY the deck as structured JSON
-matching the provided schema — no commentary, no markdown fences.
+  const shared = `You are building a highly professional, visually clean university lecture slide deck for Metropolitan International University (MIU). 
+Return ONLY the deck as structured JSON matching the provided schema — no commentary, no markdown fences.
 
-Rules:
-- Produce exactly ${data.slideCount} slides in the "slides" array, in
-  presentation order.
+Strict Layout & Spacing Rules:
+- Produce exactly ${data.slideCount} slides in the "slides" array, in presentation order.
 - Slide 1 must be type "title" with the lecture topic as its title.
-- Slide 2 must be type "identification" with title "Course Identification
-  Details" (the course metadata fields on the deck itself carry the actual
-  details — this slide is just a section marker).
-- The last slide must be type "takeaway" with 4-6 concise bullet points
-  summarizing the key things a student should remember.
-- All slides in between should be type "content" or "list", each covering
-  one coherent chunk of the material with a clear, specific title.
-- Keep titles under ${MAX_TITLE_CHARS} characters, body text under
-  ${MAX_BODY_CHARS} characters, and each bullet under ${MAX_BULLET_CHARS}
-  characters. Use at most ${MAX_BULLETS} bullets per slide.
-- Write clearly and accurately for the stated course level. Do not
-  fabricate citations, statistics, or sources.`;
+- Slide 2 must be type "identification" with title "Course Identification Details".
+- The last slide must be type "takeaway" with ${MAX_BULLETS} concise bullet points summarizing the key things a student should remember.
+- All slides in between should be type "content" or "list", each covering one coherent chunk of the material with a clear, specific title.
+- Keep titles under ${MAX_TITLE_CHARS} characters so they do not wrap onto two lines.
+- Keep body text extremely brief, focused, and punchy (strictly under ${MAX_BODY_CHARS} characters). Avoid big paragraphs!
+- For list/takeaway slides, write AT MOST ${MAX_BULLETS} bullets per slide, and keep each bullet under ${MAX_BULLET_CHARS} characters. 
+- Ensure that slide content is sparse and professional. Do NOT dump paragraphs of information onto a slide. Prioritize key conceptual headers and concise takeaways so nothing ever overflows the visual slide container or footer.`;
 
   if (data.mode === "paste") {
     return `${shared}
 
-Base the deck strictly on the source material below — organize, summarize
-and structure it, but do not introduce facts that aren't supported by it.
-If the source material contains labeled fields like "Course Code:" or
-"Credit Units:", use them to fill in courseName/courseCode/courseLevel/
-creditUnits/contactTime in the JSON output (and don't repeat those labels
-as slide content).
+Base the deck strictly on the source material below — organize, summarize, and structure it. Do not introduce facts that aren't supported by it. 
+If the source material contains labeled fields like "Course Code:" or "Credit Units:", use them to fill in courseName/courseCode/courseLevel/creditUnits/contactTime in the JSON output.
 
 ${identLines ? `Known course details (use these unless the source text overrides them):\n${identLines}\n` : ""}
 ${data.extraNotes ? `Additional guidance from the instructor: ${data.extraNotes}\n` : ""}
@@ -226,8 +215,7 @@ Topic / lecture prompt: ${data.topic}
 ${identLines ? `\nCourse details:\n${identLines}` : ""}
 ${data.extraNotes ? `\nAdditional guidance from the instructor: ${data.extraNotes}` : ""}
 
-No source material was provided — use your own subject-matter knowledge to
-write accurate, well-organized lecture content on this topic.`;
+No source material was provided — use your own subject-matter knowledge to write highly organized, exceptionally concise lecture content on this topic. Ensure perfect formatting and plenty of whitespace.`;
 }
 
 // ---------- Gemini call ----------
