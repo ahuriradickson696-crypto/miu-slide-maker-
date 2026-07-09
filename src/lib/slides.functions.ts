@@ -1,75 +1,14 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL = "gemini-3.5-flash";
+// ---------- No AI, no API keys, no network calls. -------------------------
+// Everything below is plain text-parsing: it looks for headings, labeled
+// fields ("Course Code:", etc.), bullet markers, and paragraph breaks in
+// whatever text you give it, and turns that structure into slides. It
+// cannot invent content that isn't in your input — it can only organize
+// what's there.
 
 const MAX_PASTE_CHARS = 12000;
-const FETCH_TIMEOUT_MS = 45_000;
-const MAX_RETRIES = 5;
-// Max slideCount is 24, so this guarantees the whole deck's content is
-// written in a SINGLE call instead of several small batches. Fewer calls
-// = far less chance of tripping a free-tier per-minute request quota.
-const SLIDES_PER_BATCH = 24;
-const BATCH_CONCURRENCY = 1; // only ever one batch now, kept for clarity
-
-// ---------- Schemas sent to Gemini for guaranteed-valid JSON ----------
-
-const OUTLINE_SCHEMA = {
-  type: "object",
-  properties: {
-    topic: { type: "string" },
-    courseName: { type: "string" },
-    courseCode: { type: "string" },
-    courseLevel: { type: "string" },
-    creditUnits: { type: "string" },
-    contactTime: { type: "string" },
-    slideOutline: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          type: { type: "string", enum: ["title", "identification", "content", "list", "takeaway"] },
-          title: { type: "string" },
-        },
-        required: ["type", "title"],
-      },
-    },
-  },
-  required: ["topic", "slideOutline"],
-};
-
-const SLIDE_BATCH_SCHEMA = {
-  type: "object",
-  properties: {
-    slides: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          type: { type: "string", enum: ["title", "identification", "content", "list", "takeaway"] },
-          title: { type: "string" },
-          subtitle: { type: "string" },
-          body: { type: "string" },
-          bullets: { type: "array", items: { type: "string" } },
-          sections: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                heading: { type: "string" },
-                description: { type: "string" },
-              },
-              required: ["heading", "description"],
-            },
-          },
-        },
-        required: ["type", "title"],
-      },
-    },
-  },
-  required: ["slides"],
-};
 
 // ---------- Input validation ----------
 
@@ -111,263 +50,358 @@ export type SlideDeck = {
   slides: SlideSpec[];
 };
 
-// ---------- Content clamping (protects layout & keeps payloads small) ----------
+// ---------- Content clamping (protects layout) ----------
 
 const MAX_BULLETS = 6;
 const MAX_BULLET_CHARS = 100;
-const MAX_SECTIONS = 4;
-const MAX_SECTION_HEADING_CHARS = 45;
-const MAX_SECTION_DESC_CHARS = 150;
 const MAX_BODY_CHARS = 320;
 const MAX_TITLE_CHARS = 70;
-const MAX_SUBTITLE_CHARS = 100;
+
+function clamp(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1).trimEnd() + "…";
+}
 
 function clampSlide(spec: SlideSpec): SlideSpec {
   return {
     type: spec.type,
-    title: (spec.title || "").slice(0, MAX_TITLE_CHARS),
-    subtitle: spec.subtitle ? spec.subtitle.slice(0, MAX_SUBTITLE_CHARS) : spec.subtitle,
-    body: spec.body ? spec.body.slice(0, MAX_BODY_CHARS) : spec.body,
-    bullets: spec.bullets?.slice(0, MAX_BULLETS).map((b) => b.slice(0, MAX_BULLET_CHARS)),
-    sections: spec.sections?.slice(0, MAX_SECTIONS).map((s) => ({
-      heading: s.heading.slice(0, MAX_SECTION_HEADING_CHARS),
-      description: s.description.slice(0, MAX_SECTION_DESC_CHARS),
+    title: clamp(spec.title || "", MAX_TITLE_CHARS),
+    subtitle: spec.subtitle ? clamp(spec.subtitle, 100) : spec.subtitle,
+    body: spec.body ? clamp(spec.body, MAX_BODY_CHARS) : spec.body,
+    bullets: spec.bullets
+      ?.slice(0, MAX_BULLETS)
+      .map((b) => clamp(b, MAX_BULLET_CHARS)),
+    sections: spec.sections?.slice(0, 4).map((s) => ({
+      heading: clamp(s.heading, 45),
+      description: clamp(s.description, 150),
     })),
   };
 }
 
-// ---------- JSON extraction (tolerant of stray markdown fences) ----------
+// ---------- Text parsing helpers ----------
 
-function extractJson(text: string): Record<string, unknown> {
-  try {
-    return JSON.parse(text.trim());
-  } catch {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const raw = (fenced ? fenced[1] : text).trim();
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new Error("No JSON object in model response");
-    return JSON.parse(raw.slice(start, end + 1));
-  }
-}
+const LABEL_PATTERNS: {
+  key:
+    "courseName" | "courseCode" | "courseLevel" | "creditUnits" | "contactTime";
+  regex: RegExp;
+}[] = [
+  { key: "courseCode", regex: /^\s*course\s*code\s*[:-]\s*(.+)$/im },
+  { key: "courseName", regex: /^\s*course\s*(name|title)\s*[:-]\s*(.+)$/im },
+  { key: "courseLevel", regex: /^\s*(course\s*)?level\s*[:-]\s*(.+)$/im },
+  { key: "creditUnits", regex: /^\s*credit\s*units?\s*[:-]\s*(.+)$/im },
+  {
+    key: "contactTime",
+    regex: /^\s*(allocated\s*)?contact\s*(time|hours?)\s*[:-]\s*(.+)$/im,
+  },
+];
 
-// ---------- Resilient fetch: timeout + retry with backoff ----------
-
-function isRetryableStatus(status: number) {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-async function callGemini(
-  model: string,
-  body: Record<string, unknown>,
-  { retries = MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS }: { retries?: number; timeoutMs?: number } = {}
-): Promise<Response> {
-  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
-  let lastError: unknown;
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const res = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-        timeoutMs
-      );
-
-      if (res.ok) return res;
-      if (res.status === 403) {
-        throw new Error("Invalid GEMINI_API_KEY, insufficient permissions, or billing required for this model.");
-      }
-      if (res.status === 429) {
-        // Free-tier Gemini quota is tight. Give it real retry headroom
-        // before surfacing anything to the user — most 429s clear within
-        // a few seconds.
-        if (attempt === retries - 1) {
-          throw new Error(
-            "Gemini usage limit reached for now. This means your API key has hit its request quota (common on the free tier). Wait a minute and try again, use fewer slides per deck, or check your plan/billing at https://aistudio.google.com/apikey."
-          );
-        }
-        lastError = new Error("Rate limited, retrying...");
-      } else if (!isRetryableStatus(res.status)) {
-        throw new Error(`AI request failed (${res.status}). Please try again in a moment.`);
-      } else if (attempt === retries - 1) {
-        throw new Error(`AI service is temporarily unavailable (${res.status}). Please try again shortly.`);
-      } else {
-        lastError = new Error(`AI error ${res.status}, retrying...`);
-      }
-    } catch (err) {
-      lastError = err;
-      // Errors we explicitly threw above (clean, user-facing) should not retry further.
-      if (
-        err instanceof Error &&
-        (err.message.startsWith("Invalid GEMINI_API_KEY") ||
-          err.message.startsWith("Gemini usage limit reached") ||
-          err.message.startsWith("AI request failed") ||
-          err.message.startsWith("AI service is temporarily unavailable"))
-      ) {
-        throw err;
-      }
-      if (attempt === retries - 1) {
-        throw new Error("Couldn't reach the AI service after several attempts. Please check your connection and try again.");
-      }
+function extractIdentification(text: string): {
+  fields: Record<string, string>;
+  remaining: string;
+} {
+  const fields: Record<string, string> = {};
+  let remaining = text;
+  for (const { key, regex } of LABEL_PATTERNS) {
+    const match = remaining.match(regex);
+    if (match) {
+      fields[key] = match[match.length - 1].trim();
+      remaining = remaining.replace(match[0], "");
     }
-    // 429s get much longer backoff since free-tier quota windows typically
-    // reset on the order of 30-60s. This schedule gives a transient rate
-    // limit real breathing room to clear before anything reaches the user,
-    // while staying inside a single serverless function's time budget.
-    const isRateLimit = lastError instanceof Error && lastError.message.startsWith("Rate limited");
-    const base = isRateLimit ? 5000 : 2000;
-    const backoffMs = Math.min(base * 2 ** attempt, 15_000) + Math.floor(Math.random() * 300);
-    await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
-  throw lastError instanceof Error ? lastError : new Error("Gemini request failed after retries.");
+  return { fields, remaining };
 }
 
-async function generateJson<T>(sys: string, userMsg: string, schema: unknown): Promise<T> {
-  const res = await callGemini(TEXT_MODEL, {
-    contents: [{ role: "user", parts: [{ text: userMsg }] }],
-    system_instruction: { parts: [{ text: sys }] },
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      maxOutputTokens: 16384,
-    },
+const BULLET_MARKER = /^\s*(?:[-*•]|\d+[.)])\s+/;
+
+function isHeadingLine(line: string): boolean {
+  const t = line.trim();
+  if (!t || t.length > 90) return false;
+  if (t.startsWith("#")) return true;
+  if (/^(topic|unit|chapter|module|lesson|section)\s+\S+/i.test(t)) return true;
+  if (BULLET_MARKER.test(t)) return false;
+  if (t.endsWith(":") && t.split(" ").length <= 10) return true;
+  const letters = t.replace(/[^A-Za-z]/g, "");
+  if (letters.length >= 4 && t === t.toUpperCase() && t.split(" ").length <= 10)
+    return true;
+  return false;
+}
+
+function cleanHeading(line: string): string {
+  return line
+    .replace(/^#+\s*/, "")
+    .replace(/:$/, "")
+    .trim();
+}
+
+function splitSentences(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .filter(Boolean);
+}
+
+type Block = { heading: string; lines: string[] };
+
+function splitIntoBlocks(text: string): Block[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const blocks: Block[] = [];
+  let current: Block = { heading: "", lines: [] };
+  for (const line of lines) {
+    if (isHeadingLine(line)) {
+      if (current.heading || current.lines.length) blocks.push(current);
+      current = { heading: cleanHeading(line), lines: [] };
+    } else {
+      current.lines.push(line);
+    }
+  }
+  if (current.heading || current.lines.length) blocks.push(current);
+
+  // Drop any block with no real content — a heading line with nothing
+  // under it (e.g. a "Topic Seven: ..." line immediately followed by
+  // another heading) shouldn't turn into an empty slide.
+  return blocks
+    .filter((b) => b.lines.join(" ").trim().length > 0)
+    .map((b) => ({ heading: b.heading || "Overview", lines: b.lines }));
+}
+
+function blockToSlideContent(block: Block): {
+  title: string;
+  body?: string;
+  bullets?: string[];
+  type: "content" | "list";
+} {
+  const bulletLines = block.lines.filter((l) => BULLET_MARKER.test(l));
+  const proseLines = block.lines.filter((l) => !BULLET_MARKER.test(l));
+  const bullets = bulletLines
+    .map((l) => l.replace(BULLET_MARKER, "").trim())
+    .filter(Boolean);
+  const prose = proseLines.join(" ");
+
+  if (bullets.length >= 2 && bullets.length >= proseLines.length) {
+    return {
+      title: block.heading,
+      type: "list",
+      bullets: bullets.slice(0, MAX_BULLETS),
+    };
+  }
+  if (prose) {
+    const sentences = splitSentences(prose);
+    return {
+      title: block.heading,
+      type: "content",
+      body: sentences.slice(0, 3).join(" "),
+      bullets: bullets.length ? bullets.slice(0, MAX_BULLETS) : undefined,
+    };
+  }
+  return {
+    title: block.heading,
+    type: "list",
+    bullets: bullets.slice(0, MAX_BULLETS),
+  };
+}
+
+type Candidate = {
+  title: string;
+  type: "content" | "list";
+  body?: string;
+  bullets?: string[];
+};
+
+function candidateSummary(c: Candidate): string {
+  if (c.body) return c.body;
+  if (c.bullets?.length) return c.bullets.join(". ");
+  return "";
+}
+
+// Groups candidates down to a target slide count so the deck doesn't
+// balloon past slideCount when pasted material has many headings. Unlike
+// naively merging raw text, this keeps every original heading + its
+// summary intact as a "section" on the combined slide — nothing is
+// silently dropped the way collapsing raw lines into one bullet/body
+// blob would.
+function groupCandidates(candidates: Candidate[], target: number): SlideSpec[] {
+  if (candidates.length <= target || target <= 0) {
+    return candidates.map((c) => ({
+      type: c.type,
+      title: c.title,
+      body: c.body,
+      bullets: c.bullets,
+    }));
+  }
+  const groups: Candidate[][] = Array.from({ length: target }, () => []);
+  candidates.forEach((c, i) => {
+    const groupIndex = Math.min(
+      Math.floor((i * target) / candidates.length),
+      target - 1,
+    );
+    groups[groupIndex].push(c);
   });
-  const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  if (!text) throw new Error("Model returned an empty response.");
-  return extractJson(text) as T;
+  return groups
+    .filter((g) => g.length > 0)
+    .map((group) => {
+      if (group.length === 1) {
+        const c = group[0];
+        return {
+          type: c.type,
+          title: c.title,
+          body: c.body,
+          bullets: c.bullets,
+        };
+      }
+      return {
+        type: "content" as const,
+        title: group[0].title,
+        sections: group
+          .slice(0, 4)
+          .map((c) => ({ heading: c.title, description: candidateSummary(c) })),
+      };
+    });
 }
 
-// ---------- Bounded-concurrency batch runner ----------
-
-async function runBatches<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  async function next(): Promise<void> {
-    const i = cursor++;
-    if (i >= items.length) return;
-    results[i] = await worker(items[i], i);
-    return next();
-  }
-  await Promise.all(new Array(Math.min(concurrency, items.length)).fill(0).map(() => next()));
-  return results;
+function guessTopic(text: string, blocks: Block[]): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const explicitTopic = lines.find(
+    (l) => /^(topic|lecture)\s+\S+/i.test(l) && isHeadingLine(l),
+  );
+  if (explicitTopic) return cleanHeading(explicitTopic);
+  if (blocks[0]?.heading && blocks[0].heading !== "Overview")
+    return blocks[0].heading;
+  const firstSentence = splitSentences(text)[0];
+  if (firstSentence) return clamp(firstSentence, MAX_TITLE_CHARS);
+  return "Untitled Lecture";
 }
 
-// ---------- Prompts ----------
+// ---------- Deck assembly ----------
 
-const SCHEMA_HINT = `Rules:
-- Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
-- At most 4 sections OR 6 bullets per slide (never both on the same slide).`;
+function buildFromPaste(data: z.infer<typeof GenerateInput>): SlideDeck {
+  const { fields, remaining } = extractIdentification(data.pastedContent);
+  const blocks = splitIntoBlocks(remaining);
+  const contentSlots = Math.max(1, data.slideCount - 3); // reserve title, identification, takeaway
+  const candidates: Candidate[] = blocks.map((b) => blockToSlideContent(b));
 
-// ---------- Public server functions ----------
+  const contentSlides: SlideSpec[] = groupCandidates(candidates, contentSlots);
+
+  const rawContentSlides = candidates;
+
+  const takeawayBullets = rawContentSlides
+    .map((c) =>
+      c.bullets?.length
+        ? c.bullets[0]
+        : c.body
+          ? splitSentences(c.body)[0]
+          : c.title,
+    )
+    .filter(Boolean)
+    .slice(0, 6);
+
+  const topic = data.topic || guessTopic(data.pastedContent, blocks);
+
+  const slides: SlideSpec[] = [
+    { type: "title", title: topic },
+    { type: "identification", title: "Course Identification Details" },
+    ...contentSlides,
+    {
+      type: "takeaway",
+      title: "Key Takeaways",
+      bullets: takeawayBullets.length
+        ? takeawayBullets
+        : ["Review the material covered in this lecture."],
+    },
+  ];
+
+  return {
+    courseName: data.courseName || fields.courseName || "",
+    courseCode: data.courseCode || fields.courseCode || "",
+    courseLevel: data.courseLevel || fields.courseLevel || "",
+    creditUnits: data.creditUnits || fields.creditUnits || "",
+    contactTime: data.contactTime || fields.contactTime || "",
+    topic,
+    slides: slides.map(clampSlide),
+  };
+}
+
+// Brief mode has no source text to parse, so this builds a generic
+// scaffold (section headings + whatever you typed in "extra notes",
+// split across slots) rather than invented subject-matter content.
+const SCAFFOLD_SECTIONS = [
+  "Introduction",
+  "Background & Context",
+  "Key Concepts",
+  "Core Principles",
+  "Examples & Applications",
+  "Common Challenges",
+  "Discussion Points",
+  "Case Study",
+  "Practical Exercise",
+  "Further Reading",
+];
+
+function buildFromBrief(data: z.infer<typeof GenerateInput>): SlideDeck {
+  const contentSlots = Math.max(1, data.slideCount - 3);
+  const noteSentences = splitSentences(data.extraNotes);
+
+  const contentSlides: SlideSpec[] = Array.from(
+    { length: contentSlots },
+    (_, i) => {
+      const title = SCAFFOLD_SECTIONS[i % SCAFFOLD_SECTIONS.length];
+      const chunk = noteSentences.slice(i * 2, i * 2 + 2);
+      return {
+        type: "content" as const,
+        title,
+        body: chunk.length
+          ? chunk.join(" ")
+          : `Add your notes on "${title.toLowerCase()}" for ${data.topic || "this topic"} here.`,
+      };
+    },
+  );
+
+  const topic = data.topic || "Untitled Lecture";
+
+  const slides: SlideSpec[] = [
+    { type: "title", title: topic },
+    { type: "identification", title: "Course Identification Details" },
+    ...contentSlides,
+    {
+      type: "takeaway",
+      title: "Key Takeaways",
+      bullets: noteSentences.length
+        ? noteSentences.slice(-4)
+        : [`Summarize the key points of ${topic || "this lecture"} here.`],
+    },
+  ];
+
+  return {
+    courseName: data.courseName || "",
+    courseCode: data.courseCode || "",
+    courseLevel: data.courseLevel || "",
+    creditUnits: data.creditUnits || "",
+    contactTime: data.contactTime || "",
+    topic,
+    slides: slides.map(clampSlide),
+  };
+}
+
+// ---------- Public server function ----------
 
 export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
-    if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
-
-    // Step 1: fast outline call — decides structure & metadata only.
-    const outlineSys = `You are a curriculum designer for Metropolitan International University (MIU). Design the STRUCTURE of a ${data.slideCount}-slide academic lecture deck.
-Rules:
-- Slide 1 MUST be type "title".
-- Slide 2 MUST be type "identification".
-- Final slide MUST be type "takeaway".
-- Middle slides mix "content" and "list" types.
-- Output exactly ${data.slideCount} entries in slideOutline, in slide order.
-- Carefully scan the input for course identification details, which are often given as labeled lines near the top of course material (e.g. "Course Code:", "Course Name:", "Credit Units:", "Level:", "Contact Hours:", "Semester:"). Extract these exactly as written wherever present.
-- Fill topic/courseName/courseCode/courseLevel/creditUnits/contactTime from what you find in the input. If a field genuinely isn't present anywhere in the input, use "" — do not invent or guess values.`;
-
-    const outlineUserMsg =
-      data.mode === "paste"
-        ? `Extract a lecture structure from this raw course material:\n"""\n${data.pastedContent}\n"""\n\nEXTRA GUIDANCE: ${data.extraNotes || "(none)"}`
-        : `TOPIC: ${data.topic}\nCOURSE NAME: ${data.courseName}\nCOURSE CODE: ${data.courseCode}\nCOURSE LEVEL: ${data.courseLevel}\nCREDIT UNITS: ${data.creditUnits}\nCONTACT TIME: ${data.contactTime}\nEXTRA NOTES: ${data.extraNotes}`;
-
-    const outline = await generateJson<{
-      topic?: string;
-      courseName?: string;
-      courseCode?: string;
-      courseLevel?: string;
-      creditUnits?: string;
-      contactTime?: string;
-      slideOutline: { type: SlideSpec["type"]; title: string }[];
-    }>(outlineSys, outlineUserMsg, OUTLINE_SCHEMA);
-
-    if (!outline.slideOutline?.length) throw new Error("Model returned no slide outline.");
-
-    // Step 2: expand each slide's full content in small parallel batches.
-    // Small payloads per call = fast, low truncation risk, and one failed
-    // batch can be retried independently without redoing the whole deck.
-    const batches: { start: number; items: typeof outline.slideOutline }[] = [];
-    for (let i = 0; i < outline.slideOutline.length; i += SLIDES_PER_BATCH) {
-      batches.push({ start: i, items: outline.slideOutline.slice(i, i + SLIDES_PER_BATCH) });
+    if (data.mode === "paste") {
+      if (data.pastedContent.trim().length < 20) {
+        throw new Error("Please paste some course material first.");
+      }
+      return buildFromPaste(data);
     }
-
-    const contextLine = data.mode === "paste"
-      ? `Base all content on this source material:\n"""\n${data.pastedContent.slice(0, 6000)}\n"""`
-      : `Topic: ${data.topic}. Extra notes: ${data.extraNotes || "(none)"}`;
-
-    const batchResults = await runBatches(batches, BATCH_CONCURRENCY, async (batch) => {
-      const sys = `You are a curriculum designer for MIU, writing full slide content for specific slides in a lecture deck. ${SCHEMA_HINT}`;
-      const userMsg = `${contextLine}\n\nWrite full content for EXACTLY these ${batch.items.length} slides, in this exact order, preserving each "type" and "title" verbatim:\n${JSON.stringify(batch.items, null, 2)}`;
-      const result = await generateJson<{ slides: SlideSpec[] }>(sys, userMsg, SLIDE_BATCH_SCHEMA);
-      if (!result.slides?.length) throw new Error(`Batch starting at slide ${batch.start + 1} returned no content.`);
-      return result.slides;
-    });
-
-    const slides = batchResults.flat().map((s, i) => {
-      const clamped = clampSlide(s);
-      // Guarantee the outline's structural type/title win, even if the
-      // model drifted, so slide 1/2/last always match required types.
-      const outlineEntry = outline.slideOutline[i];
-      return outlineEntry ? { ...clamped, type: outlineEntry.type, title: clamped.title || outlineEntry.title } : clamped;
-    });
-
-    if (!slides.length) throw new Error("Deck generation produced no slides.");
-
-    const deck: SlideDeck = {
-      courseName: data.courseName || outline.courseName || "",
-      courseCode: data.courseCode || outline.courseCode || "",
-      courseLevel: data.courseLevel || outline.courseLevel || "",
-      creditUnits: data.creditUnits || outline.creditUnits || "",
-      contactTime: data.contactTime || outline.contactTime || "",
-      topic: data.topic || outline.topic || "Untitled Lecture",
-      slides,
-    };
-    return deck;
-  });
-
-const RegenerateInput = z.object({
-  slideType: z.enum(["title", "identification", "content", "list", "takeaway"]),
-  currentTitle: z.string(),
-  topic: z.string().optional().default(""),
-});
-
-export const regenerateSlide = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => RegenerateInput.parse(data))
-  .handler(async ({ data }) => {
-    if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
-    const sys = `You are a curriculum designer. Write ONE replacement slide of type "${data.slideType}" for a deck about "${data.topic}". ${SCHEMA_HINT}`;
-    const result = await generateJson<{ slides: SlideSpec[] }>(
-      sys,
-      `Write an alternative version of a slide currently titled: "${data.currentTitle}"`,
-      SLIDE_BATCH_SCHEMA
-    );
-    const slide = result.slides?.[0];
-    if (!slide) throw new Error("Model returned no slide.");
-    return { slide: clampSlide({ ...slide, type: data.slideType }) };
+    if (!data.topic.trim()) {
+      throw new Error("Please enter a topic.");
+    }
+    return buildFromBrief(data);
   });
