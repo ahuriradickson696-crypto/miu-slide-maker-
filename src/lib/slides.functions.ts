@@ -1,10 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-// ✨ ENHANCED WITH: Extended Thinking + Intelligent Analysis + Auto-Structure
-// 1. Analyzes content structure BEFORE generating
-// 2. Uses extended thinking to reason through optimal slide flow
-// 3. Auto-detects topics, learning outcomes, prerequisites
+// ✨ ENHANCED WITH: Strict Mapping + Mutual Exclusivity
+// 1. Synchronizes Phase 1 outline length exactly with Phase 2 slide count
+// 2. Enforces EITHER bullets OR sections (never both) to prevent UI collisions
+// 3. Uses explicit slide-by-slide index mapping in the prompt
 
 const MAX_PASTE_CHARS = 12000;
 
@@ -130,6 +130,11 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
       ),
     }));
 
+  // FIX 1: Prevent Layout Collisions. 
+  // If AI hallucinates and returns BOTH sections and bullets, we strictly pick one.
+  const hasSections = sections.length > 0;
+  const safeBullets = hasSections ? undefined : (bullets.length ? bullets : undefined);
+
   return {
     type,
     title: clamp(typeof spec.title === "string" ? spec.title : "", MAX_TITLE_CHARS),
@@ -141,7 +146,7 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
       typeof spec.body === "string" && spec.body.trim()
         ? clamp(spec.body, MAX_BODY_CHARS)
         : undefined,
-    bullets: bullets.length ? bullets : undefined,
+    bullets: safeBullets,
     sections: sections.length ? sections : undefined,
   };
 }
@@ -216,6 +221,10 @@ const deckSchema = {
 
 function buildAnalysisPrompt(data: GenerateInputT): string {
   const content = data.mode === "paste" ? data.pastedContent : `Topic: ${data.topic}`;
+  
+  // FIX 2: Pre-calculate exact number of content slides needed
+  // This prevents the AI from generating 5 topics when we need 8 slides (which causes disorganized repeating)
+  const contentSlideCount = Math.max(1, data.slideCount - 3);
 
   return `You are an expert curriculum designer and educational strategist. Your task is to DEEPLY ANALYZE educational content and structure it optimally for learning.
 
@@ -229,7 +238,7 @@ REASONING TO APPLY:
 1. Identify natural cognitive progression (simple → complex)
 2. Detect prerequisite knowledge
 3. Find concept connections
-4. Suggest optimal learning sequence
+4. Suggest an optimal learning sequence divided into EXACTLY ${contentSlideCount} distinct, sequential topics for the 'suggestedStructure' array.
 5. Identify practical applications`;
 }
 
@@ -240,8 +249,6 @@ async function analyzeContent(
   const prompt = buildAnalysisPrompt(data);
 
   try {
-    // Phase 1 is just classification/structuring — it doesn't need
-    // extended thinking, and skipping it here roughly halves total latency.
     const response = await callGeminiWithSmartFallback(
       apiKey,
       prompt,
@@ -297,10 +304,11 @@ function buildGenerationPrompt(
     .filter(Boolean)
     .join(" | ");
 
+  // FIX 3: Explicit Slide-by-Slide mapping so the LLM doesn't scramble the order
   const structureGuidance =
     analysis.suggestedStructure.length > 0
-      ? `COGNITIVE PROGRESSION TO FOLLOW:\n${analysis.suggestedStructure
-          .map((s, i) => `${i + 1}. ${s}`)
+      ? `SLIDE-BY-SLIDE PROGRESSION MAP (For Slides 3 to ${data.slideCount - 1}):\n${analysis.suggestedStructure
+          .map((s, i) => `Slide ${i + 3}: ${s}`)
           .join("\n")}\n\n`
       : "";
 
@@ -315,20 +323,20 @@ STRATEGIC CONTENT ANALYSIS:
 ${structureGuidance}
 
 GENERATION REQUIREMENTS:
-- Create EXACTLY ${data.slideCount} slides in OPTIMAL COGNITIVE ORDER
-- Slide 1: type "title" — Topic: "${analysis.detectedTopic}"
-- Slide 2: type "identification" — Course details (${courseInfo || "Course Information"})
-- Slides 3-${data.slideCount - 1}: type "content" or "list" — Follow the suggested structure, building from foundations to applications
-- Last Slide: type "takeaway" — 4 essential learner takeaways
-- ORDERING: Arrange by learning progression (basics → advanced → practical application)
+- Create an array of EXACTLY ${data.slideCount} slides.
+- You MUST follow this precise structural order:
+  [Slide 1] type "title" — Topic: "${analysis.detectedTopic}"
+  [Slide 2] type "identification" — Course details (${courseInfo || "Course Information"})
+  [Slides 3 to ${data.slideCount - 1}] Follow the PROGRESSION MAP closely. Ensure logical flow.
+  [Slide ${data.slideCount}] type "takeaway" — 4 essential learner takeaways
 
-CONTENT RULES (CRITICAL FOR LAYOUT):
+CONTENT RULES (CRITICAL FOR LAYOUT SAFETY):
 - Titles: Maximum ${MAX_TITLE_CHARS} characters (no wrapping)
 - Body text: Maximum ${MAX_BODY_CHARS} characters (punchy, focused)
+- MUTUAL EXCLUSIVITY: For each slide, use EITHER 'bullets' OR 'sections'. NEVER USE BOTH on the same slide.
 - Bullets: Maximum ${MAX_BULLETS} bullets per slide, each ≤${MAX_BULLET_CHARS} characters
-- White space: Prioritize clarity, never overflow
-- Each slide = ONE clear concept or theme
-- Avoid paragraphs; use structure and bullet points
+- Sections: Maximum 3 sections.
+- Each slide = ONE clear concept or theme. Do not overcrowd.
 
 ${data.mode === "paste" ? `Source Material:\n"""\n${data.pastedContent}\n"""` : ""}
 
@@ -339,11 +347,6 @@ RETURN ONLY: Valid JSON matching the slide schema. No markdown. No explanation.`
 
 // ========== Gemini API Integration ==========
 
-/**
- * status: HTTP-style status code for the failure, when known. Attached at the
- * throw site (not recovered later via string-matching on the message).
- * code: a machine-checkable reason, used instead of matching on message text.
- */
 type GeminiErrorCode =
   | "MODEL_NOT_FOUND"
   | "THINKING_UNSUPPORTED"
@@ -367,8 +370,6 @@ class GeminiError extends Error {
   }
 }
 
-// Thinking-enabled calls need real headroom: a 24-slide deck with
-// thinkingLevel "high" routinely runs well past 30s.
 const REQUEST_TIMEOUT_MS = 45_000;
 const REQUEST_TIMEOUT_MS_THINKING = 90_000;
 
@@ -389,17 +390,14 @@ async function callGeminiWithThinking(
   const timeoutMs = useThinking ? REQUEST_TIMEOUT_MS_THINKING : REQUEST_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // Gemini 3.x models use thinkingLevel; Gemini 2.5 models use thinkingBudget.
-  // Sending the wrong one for a given model is a guaranteed 400, so this
-  // must stay in sync with which models are in GEMINI_MODELS/_BETA.
   const isOlder2_5 = modelConfig.name.includes("2.5");
   const thinkingConfigData = isOlder2_5
-    ? { thinkingBudget: 2500 } // Gemini 2.5 field
-    : { thinkingLevel: "high" }; // Gemini 3.x field
+    ? { thinkingBudget: 2500 }
+    : { thinkingLevel: "high" };
 
   const baseGenerationConfig: Record<string, unknown> = {
     temperature: 0.7,
-    maxOutputTokens: 8192, // Crucial limit so reasoning doesn't consume JSON token allowance
+    maxOutputTokens: 8192,
     responseMimeType: "application/json",
     responseSchema: schema,
   };
@@ -525,14 +523,9 @@ async function generateSlidesWithFullAnalysis(
   apiKey: string,
   data: GenerateInputT,
 ): Promise<SlideDeck> {
-  // ========== PHASE 1: Content Analysis ==========
   console.log("📊 Phase 1: Analyzing content intelligence...");
   const analysis = await analyzeContent(apiKey, data);
-  console.log(`  ✓ Topic: ${analysis.detectedTopic}`);
-  console.log(`  ✓ Concepts: ${analysis.keyTopics.slice(0, 3).join(", ")}`);
-  console.log(`  ✓ Level: ${analysis.estimatedLevel}`);
-
-  // ========== PHASE 2: Intelligent Slide Generation ==========
+  
   console.log("🧠 Phase 2: Generating slides with extended reasoning...");
   const prompt = buildGenerationPrompt(data, analysis);
 
@@ -543,7 +536,6 @@ async function generateSlidesWithFullAnalysis(
     data.enableExtendedThinking,
   );
 
-  console.log("✓ Slides generated and validated");
   return toSlideDeck(data, analysis, parsed);
 }
 
@@ -560,7 +552,6 @@ async function callGeminiWithSmartFallback(
 
   for (const modelConfig of modelsToTry) {
     try {
-      console.log(`🔄 Trying model: ${modelConfig.name} (${modelConfig.apiVersion})...`);
       return await callGeminiWithThinking(
         apiKey,
         prompt,
@@ -572,22 +563,11 @@ async function callGeminiWithSmartFallback(
       lastError = err as Error;
       const code = err instanceof GeminiError ? err.code : "UNKNOWN";
 
-      // Bad API key / no permission: retrying other models won't help.
-      if (code === "AUTH") {
-        throw err;
-      }
+      if (code === "AUTH") throw err;
+      if (code === "MODEL_NOT_FOUND") continue;
 
-      // Model doesn't exist under this alias/version — try the next one.
-      if (code === "MODEL_NOT_FOUND") {
-        console.log(`⚠️  ${modelConfig.name} not available, trying next...`);
-        continue;
-      }
-
-      // This model doesn't support the thinking field we sent — retry the
-      // SAME model once without thinking before moving on.
       if (useThinking && code === "THINKING_UNSUPPORTED") {
         try {
-          console.log(`⚠️  Thinking not supported on ${modelConfig.name}, retrying without thinking...`);
           return await callGeminiWithThinking(apiKey, prompt, schema, false, modelConfig);
         } catch (retryErr) {
           lastError = retryErr as Error;
@@ -596,31 +576,21 @@ async function callGeminiWithSmartFallback(
       }
 
       if (code === "RATE_LIMITED") {
-        console.log(`⏳ Rate limited on ${modelConfig.name}, waiting before retry...`);
         await sleep(5000);
         continue;
       }
-
       if (code === "SERVER_ERROR") {
-        console.log(`⚠️  Server error on ${modelConfig.name}, retrying...`);
         await sleep(2000);
         continue;
       }
-
-      // BAD_REQUEST / TIMEOUT / EMPTY_RESPONSE / PARSE_ERROR / UNKNOWN:
-      // don't assume it's fatal for every model (e.g. a payload shape one
-      // model rejects, another accepts). Log and move to the next model
-      // instead of aborting the whole generation.
-      console.warn(`⚠️  ${modelConfig.name} failed (${code}): ${(err as Error).message}. Trying next model...`);
       continue;
     }
   }
 
-  // All models failed.
   throw new GeminiError(
     lastError instanceof Error
-      ? `All Gemini models exhausted. Last error: ${lastError.message}\n\nTroubleshooting:\n1. Verify your API key is correct (from https://aistudio.google.com/apikey)\n2. Ensure the Generative Language API is enabled in Google Cloud\n3. Check if your region/IP is restricted by Google`
-      : "All models failed. Please check your API key and network.",
+      ? `All Gemini models exhausted. Last error: ${lastError.message}`
+      : "All models failed.",
     "UNKNOWN",
   );
 }
@@ -646,57 +616,25 @@ function toSlideDeck(
       throw new GeminiError("No usable slides generated. Try again.", "UNKNOWN");
     }
 
-    // Enforce proper slide structure
-    if (slides[0]?.type !== "title") {
-      slides[0] = { ...slides[0], type: "title" };
-    }
-    if (slides.length > 1 && slides[1]?.type !== "identification") {
-      slides[1] = { ...slides[1], type: "identification" };
-    }
-    if (slides[slides.length - 1]?.type !== "takeaway") {
-      slides[slides.length - 1] = {
-        ...slides[slides.length - 1],
-        type: "takeaway",
-      };
-    }
+    // Enforce proper slide structure safely
+    if (slides[0]) slides[0].type = "title";
+    if (slides.length > 1 && slides[1]) slides[1].type = "identification";
+    if (slides.length > 2) slides[slides.length - 1].type = "takeaway";
 
     const topic = analysis.detectedTopic || data.topic || "Untitled Lecture";
 
     return {
-      courseName:
-        data.courseName ||
-        analysis.detectedCourseInfo.courseName ||
-        (typeof parsed.courseName === "string" ? parsed.courseName : "") ||
-        "",
-      courseCode:
-        data.courseCode ||
-        analysis.detectedCourseInfo.courseCode ||
-        (typeof parsed.courseCode === "string" ? parsed.courseCode : "") ||
-        "",
-      courseLevel:
-        data.courseLevel ||
-        analysis.detectedCourseInfo.courseLevel ||
-        (typeof parsed.courseLevel === "string" ? parsed.courseLevel : "") ||
-        "",
-      creditUnits:
-        data.creditUnits ||
-        analysis.detectedCourseInfo.creditUnits ||
-        (typeof parsed.creditUnits === "string" ? parsed.creditUnits : "") ||
-        "",
-      contactTime:
-        data.contactTime ||
-        analysis.detectedCourseInfo.contactTime ||
-        (typeof parsed.contactTime === "string" ? parsed.contactTime : "") ||
-        "",
+      courseName: data.courseName || analysis.detectedCourseInfo.courseName || (typeof parsed.courseName === "string" ? parsed.courseName : "") || "",
+      courseCode: data.courseCode || analysis.detectedCourseInfo.courseCode || (typeof parsed.courseCode === "string" ? parsed.courseCode : "") || "",
+      courseLevel: data.courseLevel || analysis.detectedCourseInfo.courseLevel || (typeof parsed.courseLevel === "string" ? parsed.courseLevel : "") || "",
+      creditUnits: data.creditUnits || analysis.detectedCourseInfo.creditUnits || (typeof parsed.creditUnits === "string" ? parsed.creditUnits : "") || "",
+      contactTime: data.contactTime || analysis.detectedCourseInfo.contactTime || (typeof parsed.contactTime === "string" ? parsed.contactTime : "") || "",
       topic: clamp(topic, MAX_TITLE_CHARS),
       slides,
     };
   } catch (err) {
     if (err instanceof GeminiError) throw err;
-    throw new GeminiError(
-      "Failed to process Gemini response. Please try again.",
-      "UNKNOWN",
-    );
+    throw new GeminiError("Failed to process Gemini response. Please try again.", "UNKNOWN");
   }
 }
 
@@ -706,9 +644,7 @@ export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
     if (!data.apiKey.trim()) {
-      throw new Error(
-        "Add your Gemini API key from https://aistudio.google.com/apikey",
-      );
+      throw new Error("Add your Gemini API key from https://aistudio.google.com/apikey");
     }
     if (data.mode === "paste" && data.pastedContent.trim().length < 20) {
       throw new Error("Please paste substantial course material (20+ characters).");
@@ -721,9 +657,7 @@ export const generateDeck = createServerFn({ method: "POST" })
       return await generateSlidesWithFullAnalysis(data.apiKey.trim(), data);
     } catch (err) {
       throw new Error(
-        err instanceof Error
-          ? err.message
-          : "Slide generation failed. Please try again.",
+        err instanceof Error ? err.message : "Slide generation failed. Please try again.",
       );
     }
   });
