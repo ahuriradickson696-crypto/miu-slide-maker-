@@ -8,7 +8,14 @@ import { z } from "zod";
 // UI and the .pptx export don't need to know how the deck was produced.
 
 const MAX_PASTE_CHARS = 12000;
-const GEMINI_MODEL = "gemini-1.5-flash"; // Stable model with excellent structured output support
+
+// Fallback chain of candidate models to guarantee execution in all regions and key types
+const GEMINI_MODELS = [
+  "gemini-1.5-flash",
+  "gemini-2.5-flash",
+  "gemini-1.5-flash-8b",
+  "gemini-1.5-pro",
+];
 
 // ---------- Input validation ----------
 
@@ -238,9 +245,9 @@ function sleep(ms: number) {
 async function fetchGeminiOnce(
   apiKey: string,
   prompt: string,
+  modelName: string,
 ): Promise<Record<string, unknown>> {
-  // Using the v1beta API endpoint which correctly parses responseSchema and responseMimeType in standard projects
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -282,14 +289,16 @@ async function fetchGeminiOnce(
       errorDetail = await res.text().catch(() => "");
     }
 
+    if (res.status === 404) {
+      // Throw custom token prefix so callGemini knows to bypass retry and fall back to the next model
+      throw new GeminiError(
+        `MODEL_NOT_FOUND: Model "${modelName}" is unavailable in your region or layout setup.`,
+      );
+    }
+
     if (res.status === 400 || res.status === 403) {
       throw new GeminiError(
         `Gemini rejected the request (${res.status}). Gateway Reason: ${errorDetail || "Invalid key configuration or Generative Language API is disabled."}`,
-      );
-    }
-    if (res.status === 404) {
-      throw new GeminiError(
-        `Gemini model "${GEMINI_MODEL}" is not available for this key/region configuration.`,
       );
     }
     if (res.status === 429) {
@@ -355,24 +364,37 @@ async function callGemini(
   prompt: string,
 ): Promise<Record<string, unknown>> {
   let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      return await fetchGeminiOnce(apiKey, prompt);
-    } catch (err) {
-      lastError = err;
-      const status = (err as GeminiError & { status?: number })?.status;
-      const isTimeoutOrNetwork =
-        err instanceof GeminiError &&
-        /took too long|couldn't reach/i.test(err.message);
-      const retryable =
-        (status !== undefined && RETRYABLE_STATUS.has(status)) ||
-        isTimeoutOrNetwork;
-      if (!retryable || attempt === MAX_ATTEMPTS) break;
-      await sleep(500 * attempt);
+
+  // Sequentially try all supported models from the candidate array
+  for (const model of GEMINI_MODELS) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await fetchGeminiOnce(apiKey, prompt, model);
+      } catch (err) {
+        lastError = err;
+
+        // If the API returns a 404 (model not found), abort retries for this model immediately 
+        // and hop to the next candidate model in the chain.
+        if (err instanceof GeminiError && err.message.startsWith("MODEL_NOT_FOUND")) {
+          break; 
+        }
+
+        const status = (err as GeminiError & { status?: number })?.status;
+        const isTimeoutOrNetwork =
+          err instanceof GeminiError &&
+          /took too long|couldn't reach/i.test(err.message);
+        const retryable =
+          (status !== undefined && RETRYABLE_STATUS.has(status)) ||
+          isTimeoutOrNetwork;
+        
+        if (!retryable || attempt === MAX_ATTEMPTS) break;
+        await sleep(500 * attempt);
+      }
     }
   }
+  
   if (lastError instanceof Error) throw lastError;
-  throw new GeminiError("Gemini generation failed. Please try again.");
+  throw new GeminiError("Gemini generation failed on all attempts. Please verify your keys and network.");
 }
 
 const MAX_SLIDES_SAFETY_CAP = 40;
