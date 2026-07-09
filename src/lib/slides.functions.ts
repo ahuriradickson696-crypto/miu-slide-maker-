@@ -85,9 +85,9 @@ export type ContentAnalysis = {
 
 // ========== Content Clamping (Layout Safety) ==========
 const MAX_BULLETS = 4;
-const MAX_BULLET_CHARS = 75;
-const MAX_BODY_CHARS = 180;
-const MAX_TITLE_CHARS = 55;
+const MAX_BULLET_CHARS = 60; // ✨ Reduced from 75 to force shorter fragments
+const MAX_BODY_CHARS = 120;  // ✨ Reduced from 180 to enforce minimal text
+const MAX_TITLE_CHARS = 50;
 
 function clamp(text: string, max: number): string {
   const t = (text ?? "").toString().trim();
@@ -126,14 +126,32 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
       heading: clamp(typeof s.heading === "string" ? s.heading : "", 35),
       description: clamp(
         typeof s.description === "string" ? s.description : "",
-        100,
+        80, // ✨ Tighter section descriptions
       ),
     }));
 
-  // FIX 1: Prevent Layout Collisions. 
-  // If AI hallucinates and returns BOTH sections and bullets, we strictly pick one.
+  // ✨ FIX 1: ULTIMATE MUTUAL EXCLUSIVITY FOR MODERN DESIGN
+  // A modern slide should never have a body paragraph AND bullets.
   const hasSections = sections.length > 0;
-  const safeBullets = hasSections ? undefined : (bullets.length ? bullets : undefined);
+  const hasBullets = bullets.length > 0;
+
+  let finalBody =
+    typeof spec.body === "string" && spec.body.trim()
+      ? clamp(spec.body, MAX_BODY_CHARS)
+      : undefined;
+  
+  let finalBullets = undefined;
+  let finalSections = undefined;
+
+  // Strict Hierarchy: Sections override Bullets. Bullets override Body.
+  if (hasSections) {
+    finalSections = sections;
+    finalBody = undefined; 
+    finalBullets = undefined;
+  } else if (hasBullets) {
+    finalBullets = bullets;
+    finalBody = undefined;
+  }
 
   return {
     type,
@@ -142,12 +160,9 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
       typeof spec.subtitle === "string" && spec.subtitle.trim()
         ? clamp(spec.subtitle, 80)
         : undefined,
-    body:
-      typeof spec.body === "string" && spec.body.trim()
-        ? clamp(spec.body, MAX_BODY_CHARS)
-        : undefined,
-    bullets: safeBullets,
-    sections: sections.length ? sections : undefined,
+    body: finalBody,
+    bullets: finalBullets,
+    sections: finalSections,
   };
 }
 
@@ -304,7 +319,6 @@ function buildGenerationPrompt(
     .filter(Boolean)
     .join(" | ");
 
-  // FIX 3: Explicit Slide-by-Slide mapping so the LLM doesn't scramble the order
   const structureGuidance =
     analysis.suggestedStructure.length > 0
       ? `SLIDE-BY-SLIDE PROGRESSION MAP (For Slides 3 to ${data.slideCount - 1}):\n${analysis.suggestedStructure
@@ -312,7 +326,7 @@ function buildGenerationPrompt(
           .join("\n")}\n\n`
       : "";
 
-  return `You are building a world-class university lecture deck for Metropolitan International University (MIU).
+  return `You are building a world-class, ULTRA-MINIMALIST university lecture deck for Metropolitan International University (MIU).
 
 STRATEGIC CONTENT ANALYSIS:
 - Primary Topic: ${analysis.detectedTopic}
@@ -323,20 +337,21 @@ STRATEGIC CONTENT ANALYSIS:
 ${structureGuidance}
 
 GENERATION REQUIREMENTS:
-- Create an array of EXACTLY ${data.slideCount} slides.
+- Create an array of EXACTLY ${data.slideCount} slides in strictly sequential order.
 - You MUST follow this precise structural order:
   [Slide 1] type "title" — Topic: "${analysis.detectedTopic}"
   [Slide 2] type "identification" — Course details (${courseInfo || "Course Information"})
-  [Slides 3 to ${data.slideCount - 1}] Follow the PROGRESSION MAP closely. Ensure logical flow.
+  [Slides 3 to ${data.slideCount - 1}] Follow the PROGRESSION MAP closely.
   [Slide ${data.slideCount}] type "takeaway" — 4 essential learner takeaways
 
-CONTENT RULES (CRITICAL FOR LAYOUT SAFETY):
-- Titles: Maximum ${MAX_TITLE_CHARS} characters (no wrapping)
-- Body text: Maximum ${MAX_BODY_CHARS} characters (punchy, focused)
-- MUTUAL EXCLUSIVITY: For each slide, use EITHER 'bullets' OR 'sections'. NEVER USE BOTH on the same slide.
-- Bullets: Maximum ${MAX_BULLETS} bullets per slide, each ≤${MAX_BULLET_CHARS} characters
-- Sections: Maximum 3 sections.
-- Each slide = ONE clear concept or theme. Do not overcrowd.
+CONTENT RULES (MODERN PRESENTATION STYLE - CRITICAL):
+- NO FULL SENTENCES: Write in punchy, TED-talk style fragments (e.g., "Drives user engagement" instead of "This feature helps to drive better user engagement").
+- ULTRA-CONCISE: The instructor will speak to the slides; the slides are purely visual anchors. Do not over-explain.
+- MUTUAL EXCLUSIVITY: A slide must use ONLY 'body' text, ONLY 'bullets', or ONLY 'sections'. Never combine them.
+- Titles: Maximum 5 words. Make them impactful.
+- Body text: Max ${MAX_BODY_CHARS} characters. Use rarely.
+- Bullets: Max ${MAX_BULLETS} bullets. STRICTLY 3-8 words per bullet.
+- Sections: Max 3 sections. Headings must be 1-3 words. Descriptions must be fragments.
 
 ${data.mode === "paste" ? `Source Material:\n"""\n${data.pastedContent}\n"""` : ""}
 
