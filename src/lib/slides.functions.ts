@@ -1,12 +1,14 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-// ---------- No AI, no API keys, no network calls. -------------------------
+// ---------- This file: no AI, no API keys, no network calls. --------------
 // Everything below is plain text-parsing: it looks for headings, labeled
 // fields ("Course Code:", etc.), bullet markers, and paragraph breaks in
 // whatever text you give it, and turns that structure into slides. It
 // cannot invent content that isn't in your input — it can only organize
-// what's there.
+// what's there. This deck is always built first and is what the app
+// falls back to if the optional AI step (see ai-organize.ts) is off or
+// unavailable.
 
 const MAX_PASTE_CHARS = 12000;
 
@@ -52,7 +54,7 @@ export type SlideDeck = {
 
 // ---------- Content clamping (protects layout) ----------
 
-const MAX_BULLETS = 6;
+export const MAX_BULLETS = 6;
 const MAX_BULLET_CHARS = 100;
 const MAX_BODY_CHARS = 320;
 const MAX_TITLE_CHARS = 70;
@@ -63,7 +65,11 @@ function clamp(text: string, max: number): string {
   return t.slice(0, max - 1).trimEnd() + "…";
 }
 
-function clampSlide(spec: SlideSpec): SlideSpec {
+// Exported so the optional AI-organization step (ai-organize.ts) can
+// re-clamp slides it reorders/rewrites to the exact same layout-safety
+// limits used here, instead of duplicating (and risking drift from)
+// these numbers.
+export function clampSlide(spec: SlideSpec): SlideSpec {
   return {
     type: spec.type,
     title: clamp(spec.title || "", MAX_TITLE_CHARS),
@@ -87,12 +93,21 @@ const LABEL_PATTERNS: {
   regex: RegExp;
 }[] = [
   { key: "courseCode", regex: /^\s*course\s*code\s*[:-]\s*(.+)$/im },
-  { key: "courseName", regex: /^\s*course\s*(name|title)\s*[:-]\s*(.+)$/im },
+  {
+    key: "courseName",
+    regex: /^\s*course\s*(name|title)\s*[:-]\s*(.+)$/im,
+  },
   { key: "courseLevel", regex: /^\s*(course\s*)?level\s*[:-]\s*(.+)$/im },
-  { key: "creditUnits", regex: /^\s*credit\s*units?\s*[:-]\s*(.+)$/im },
+  // Broadened: many lecturers write "Units:" or "Hours:" without the
+  // "Credit"/"Contact" prefix, and some use "Duration:" instead of
+  // "Contact Time:". The old, stricter patterns missed these and left
+  // the identification slide showing blank "—" fields even though the
+  // data was right there in the pasted text.
+  { key: "creditUnits", regex: /^\s*(credit\s*)?units?\s*[:-]\s*(.+)$/im },
   {
     key: "contactTime",
-    regex: /^\s*(allocated\s*)?contact\s*(time|hours?)\s*[:-]\s*(.+)$/im,
+    regex:
+      /^\s*(allocated\s*contact\s*(time|hours?)|contact\s*(time|hours?)|duration)\s*[:-]\s*(.+)$/im,
   },
 ];
 
@@ -218,12 +233,41 @@ function candidateSummary(c: Candidate): string {
   return "";
 }
 
-// Groups candidates down to a target slide count so the deck doesn't
-// balloon past slideCount when pasted material has many headings. Unlike
-// naively merging raw text, this keeps every original heading + its
-// summary intact as a "section" on the combined slide — nothing is
-// silently dropped the way collapsing raw lines into one bullet/body
-// blob would.
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function groupToSlide(group: Candidate[], continuation = false): SlideSpec {
+  if (group.length === 1) {
+    const c = group[0];
+    return { type: c.type, title: c.title, body: c.body, bullets: c.bullets };
+  }
+  return {
+    type: "content",
+    title: group[0].title + (continuation ? " (cont.)" : ""),
+    sections: group.map((c) => ({
+      heading: c.title,
+      description: candidateSummary(c),
+    })),
+  };
+}
+
+// A single content slide only has visual room for ~4 stacked sections
+// before text starts overflowing the layout (see clampSlide's `sections`
+// cap). The previous version of this function packed everything into
+// `target` groups and then did `group.slice(0, 4)` when building each
+// slide — which silently deleted any candidate past the 4th in an
+// oversized group. That's the "vanishing topics" bug: paste a chapter
+// with 12 headings and ask for 6 slides, and several headings would
+// just disappear with no error and no trace.
+//
+// Fixed behaviour: still try to hit `target` slides, but if packing put
+// more than 4 blocks in one group, split that group across additional
+// "(cont.)" slides instead of dropping the overflow. This can produce a
+// few more slides than requested when the source material genuinely
+// doesn't fit — that's the honest outcome, not silent data loss.
 function groupCandidates(candidates: Candidate[], target: number): SlideSpec[] {
   if (candidates.length <= target || target <= 0) {
     return candidates.map((c) => ({
@@ -233,6 +277,7 @@ function groupCandidates(candidates: Candidate[], target: number): SlideSpec[] {
       bullets: c.bullets,
     }));
   }
+  const MAX_SECTIONS_PER_SLIDE = 4;
   const groups: Candidate[][] = Array.from({ length: target }, () => []);
   candidates.forEach((c, i) => {
     const groupIndex = Math.min(
@@ -241,26 +286,19 @@ function groupCandidates(candidates: Candidate[], target: number): SlideSpec[] {
     );
     groups[groupIndex].push(c);
   });
-  return groups
-    .filter((g) => g.length > 0)
-    .map((group) => {
-      if (group.length === 1) {
-        const c = group[0];
-        return {
-          type: c.type,
-          title: c.title,
-          body: c.body,
-          bullets: c.bullets,
-        };
-      }
-      return {
-        type: "content" as const,
-        title: group[0].title,
-        sections: group
-          .slice(0, 4)
-          .map((c) => ({ heading: c.title, description: candidateSummary(c) })),
-      };
-    });
+
+  const slides: SlideSpec[] = [];
+  for (const group of groups) {
+    if (group.length === 0) continue;
+    if (group.length <= MAX_SECTIONS_PER_SLIDE) {
+      slides.push(groupToSlide(group));
+      continue;
+    }
+    chunk(group, MAX_SECTIONS_PER_SLIDE).forEach((part, i) =>
+      slides.push(groupToSlide(part, i > 0)),
+    );
+  }
+  return slides;
 }
 
 function guessTopic(text: string, blocks: Block[]): string {
@@ -352,12 +390,12 @@ function buildFromBrief(data: z.infer<typeof GenerateInput>): SlideDeck {
     { length: contentSlots },
     (_, i) => {
       const title = SCAFFOLD_SECTIONS[i % SCAFFOLD_SECTIONS.length];
-      const chunk = noteSentences.slice(i * 2, i * 2 + 2);
+      const noteChunk = noteSentences.slice(i * 2, i * 2 + 2);
       return {
         type: "content" as const,
         title,
-        body: chunk.length
-          ? chunk.join(" ")
+        body: noteChunk.length
+          ? noteChunk.join(" ")
           : `Add your notes on "${title.toLowerCase()}" for ${data.topic || "this topic"} here.`,
       };
     },
