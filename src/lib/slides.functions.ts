@@ -11,18 +11,26 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// 🚀 FIX 1: Prioritize v1beta for all models. 
-// v1beta is required for stable "responseSchema" (Structured Outputs) support.
+// 🚀 FIX: All Gemini 1.5 models (gemini-1.5-flash, gemini-1.5-flash-8b,
+// gemini-1.5-pro) and their "-latest" aliases were fully shut down by
+// Google in 2026. Every request to them now returns a 404 MODEL_NOT_FOUND.
+// That is why every model in your old fallback list failed in sequence.
+//
+// Fix: prioritize the auto-updating alias names. Google hot-swaps what
+// these point to whenever they release a new generation, so you inherit
+// upgrades automatically instead of hardcoding a model string that will
+// eventually be retired again.
 const GEMINI_MODELS = [
-  { name: "gemini-1.5-flash", apiVersion: "v1beta" },
-  { name: "gemini-1.5-flash-8b", apiVersion: "v1beta" }, // Added 8b as it's highly available
-  { name: "gemini-1.5-pro", apiVersion: "v1beta" },
+  { name: "gemini-flash-latest", apiVersion: "v1beta" }, // currently -> gemini-3.5-flash
+  { name: "gemini-pro-latest", apiVersion: "v1beta" },
+  { name: "gemini-3.5-flash", apiVersion: "v1beta" },
 ];
 
-// Fallback: Try "-latest" variants if standard aliases fail
+// Fallback: older but still-live stable models (kept in case an alias is
+// briefly unavailable in your region/project)
 const GEMINI_MODELS_BETA = [
-  { name: "gemini-1.5-flash-latest", apiVersion: "v1beta" },
-  { name: "gemini-1.5-pro-latest", apiVersion: "v1beta" },
+  { name: "gemini-2.5-flash", apiVersion: "v1beta" },
+  { name: "gemini-2.5-pro", apiVersion: "v1beta" },
 ];
 
 // ========== Input validation ==========
@@ -353,16 +361,17 @@ async function callGeminiWithThinking(
   prompt: string,
   schema: Record<string, unknown>,
   useThinking: boolean,
-  modelConfig: { name: string; apiVersion: string } = { name: "gemini-1.5-flash", apiVersion: "v1beta" },
+  modelConfig: { name: string; apiVersion: string } = { name: "gemini-flash-latest", apiVersion: "v1beta" },
 ): Promise<Record<string, unknown>> {
   const url = `https://generativelanguage.googleapis.com/${modelConfig.apiVersion}/models/${modelConfig.name}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  // Extended thinking only works on specific experimental models
-  const supportsThinking = modelConfig.name.includes("thinking");
-  const shouldUseThinking = useThinking && supportsThinking;
+  // Current Gemini 2.5/3.x models support native "thinking" — no need to
+  // gate this on the model name containing the word "thinking" anymore
+  // (that convention only applied to old experimental 1.5/2.0 models).
+  const shouldUseThinking = useThinking;
 
   const body = shouldUseThinking
     ? {
@@ -485,11 +494,8 @@ async function generateSlidesWithFullAnalysis(
   // ========== PHASE 2: Intelligent Slide Generation ==========
   console.log("🧠 Phase 2: Generating slides with extended reasoning...");
   const prompt = buildGenerationPrompt(data, analysis);
-  
-  let parsed: Record<string, unknown>;
-  
-  // Use smart fallback to find working model
-  parsed = await callGeminiWithSmartFallback(
+
+  const parsed = await callGeminiWithSmartFallback(
     apiKey,
     prompt,
     deckSchema,
@@ -523,15 +529,15 @@ async function callGeminiWithSmartFallback(
         modelConfig,
       );
     } catch (err) {
-      lastError = err;
+      lastError = err as Error;
       const status = (err as any)?.status;
       const message = err instanceof Error ? err.message : String(err);
 
-      // 🚀 FIX 2: Do NOT silently swallow 400 (Bad Request) errors! 
+      // Do NOT silently swallow 400 (Bad Request) errors!
       // If the schema or prompt is strictly invalid, we want to know immediately.
       if (status === 400 && !message.includes("Thinking feature not supported")) {
         console.error(`🚨 Schema/Payload Error on ${modelConfig.name}:`, message);
-        throw err; 
+        throw err;
       }
 
       // If 404, this model isn't available - try next
@@ -552,7 +558,7 @@ async function callGeminiWithSmartFallback(
             modelConfig,
           );
         } catch (retryErr) {
-          lastError = retryErr;
+          lastError = retryErr as Error;
           continue;
         }
       }
