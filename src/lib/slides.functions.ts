@@ -11,11 +11,12 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
+// Models to try in order of preference
+// Note: thinking feature only works on specific experimental models
 const GEMINI_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-thinking-exp-01-21",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-latest",
+  "gemini-1.5-flash",           // Most stable & reliable
+  "gemini-1.5-flash-latest",    // Latest stable version
+  "gemini-2.0-flash",           // Newest (if available)
 ];
 
 // ========== Input validation ==========
@@ -249,12 +250,42 @@ async function analyzeContent(
   const prompt = buildAnalysisPrompt(data);
 
   try {
-    const response = await callGeminiWithThinking(
-      apiKey,
-      prompt,
-      analysisSchema,
-      data.enableExtendedThinking,
-    );
+    let response: Record<string, unknown>;
+    
+    // Try with thinking first if enabled
+    if (data.enableExtendedThinking) {
+      try {
+        response = await callGeminiWithThinking(
+          apiKey,
+          prompt,
+          analysisSchema,
+          true,
+          "gemini-1.5-flash",
+        );
+      } catch (err) {
+        // Fall back to standard mode if thinking fails
+        if (err instanceof Error && err.message.includes("Thinking feature not supported")) {
+          console.log("⚠️  Thinking not available for analysis, using standard mode...");
+          response = await callGeminiWithThinking(
+            apiKey,
+            prompt,
+            analysisSchema,
+            false,
+            "gemini-1.5-flash",
+          );
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      response = await callGeminiWithThinking(
+        apiKey,
+        prompt,
+        analysisSchema,
+        false,
+        "gemini-1.5-flash",
+      );
+    }
 
     return {
       detectedTopic: response.detectedTopic || data.topic || "Lecture",
@@ -360,14 +391,18 @@ async function callGeminiWithThinking(
   prompt: string,
   schema: Record<string, unknown>,
   useThinking: boolean,
-  modelName: string = "gemini-2.0-flash-thinking-exp-01-21",
+  modelName: string = "gemini-1.5-flash",
 ): Promise<Record<string, unknown>> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  const body = useThinking
+  // Extended thinking only works on specific experimental models
+  const supportsThinking = modelName.includes("thinking");
+  const shouldUseThinking = useThinking && supportsThinking;
+
+  const body = shouldUseThinking
     ? {
         systemInstruction: {
           parts: [
@@ -385,9 +420,16 @@ async function callGeminiWithThinking(
         },
       }
     : {
+        systemInstruction: {
+          parts: [
+            {
+              text: "You are an expert curriculum designer. Ensure slides follow cognitive learning progression and learning science principles.",
+            },
+          ],
+        },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.6,
+          temperature: 0.7,
           responseMimeType: "application/json",
           responseSchema: schema,
         },
@@ -415,6 +457,11 @@ async function callGeminiWithThinking(
       if (res.status === 404) {
         throw new GeminiError(
           `MODEL_NOT_FOUND: "${modelName}" unavailable. Retrying...`,
+        );
+      }
+      if (res.status === 400 && errorDetail.includes("thinking")) {
+        throw new GeminiError(
+          `Thinking feature not supported. Using standard mode...`,
         );
       }
       if (res.status === 429) {
@@ -472,12 +519,43 @@ async function generateSlidesWithFullAnalysis(
   // ========== PHASE 2: Intelligent Slide Generation ==========
   console.log("🧠 Phase 2: Generating slides with extended reasoning...");
   const prompt = buildGenerationPrompt(data, analysis);
-  const parsed = await callGeminiWithThinking(
-    apiKey,
-    prompt,
-    deckSchema,
-    data.enableExtendedThinking,
-  );
+  
+  let parsed: Record<string, unknown>;
+  
+  // Try with thinking first (if enabled)
+  if (data.enableExtendedThinking) {
+    try {
+      parsed = await callGeminiWithThinking(
+        apiKey,
+        prompt,
+        deckSchema,
+        true,
+        "gemini-1.5-flash", // Use a proven model
+      );
+    } catch (err) {
+      // If thinking fails, fall back to standard mode
+      if (err instanceof Error && err.message.includes("Thinking feature not supported")) {
+        console.log("⚠️  Thinking not supported, using standard generation...");
+        parsed = await callGeminiWithThinking(
+          apiKey,
+          prompt,
+          deckSchema,
+          false, // Disable thinking
+          "gemini-1.5-flash",
+        );
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    parsed = await callGeminiWithThinking(
+      apiKey,
+      prompt,
+      deckSchema,
+      false,
+      "gemini-1.5-flash",
+    );
+  }
 
   console.log("✓ Slides generated and validated");
   return toSlideDeck(data, analysis, parsed);
