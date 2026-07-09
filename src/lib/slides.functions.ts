@@ -8,7 +8,7 @@ import { z } from "zod";
 // UI and the .pptx export don't need to know how the deck was produced.
 
 const MAX_PASTE_CHARS = 12000;
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 // ---------- Input validation ----------
 
