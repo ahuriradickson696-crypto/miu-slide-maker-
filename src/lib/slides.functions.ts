@@ -9,10 +9,12 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// Highly available public models. Pro model is removed to prevent triggering regional access blocks.
+// Highly resilient Flash model variations to guarantee execution even during regional routing updates
 const GEMINI_MODELS = [
-  "gemini-2.5-flash",
   "gemini-1.5-flash",
+  "gemini-1.5-flash-latest",
+  "gemini-2.5-flash",
+  "gemini-1.5-flash-8b",
 ];
 
 // ---------- Input validation ----------
@@ -365,9 +367,9 @@ async function callGemini(
   let lastError: unknown;
   let allModelsUnavailable = true;
 
-  // Sequentially try our slim fallback list to save resources
+  // Sequentially try our resilient fallback list
   for (const model of GEMINI_MODELS) {
-    const modelMaxAttempts = 2; // Only 2 attempts per model to stay well clear of the gateway limit
+    const modelMaxAttempts = 2; // Only 2 attempts per model to stay well clear of the gateway rate limit
 
     for (let attempt = 1; attempt <= modelMaxAttempts; attempt++) {
       try {
@@ -377,7 +379,7 @@ async function callGemini(
         const status = (err as GeminiError & { status?: number })?.status;
 
         if (err instanceof GeminiError && err.message.startsWith("MODEL_NOT_FOUND")) {
-          break; // Hop to next model immediately
+          break; // Hop to next model in list immediately
         }
 
         allModelsUnavailable = false;
