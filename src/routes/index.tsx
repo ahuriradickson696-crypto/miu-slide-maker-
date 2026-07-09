@@ -4,6 +4,7 @@ import { toast, Toaster } from "sonner";
 import { Loader2, Sparkles, Download, FileText, Wand2 } from "lucide-react";
 import { generateDeck, type SlideDeck } from "@/lib/slides.functions";
 import { exportDeckToPptx } from "@/lib/pptx-export";
+import { aiOrganizeDeck } from "@/lib/ai-organize";
 import logo from "@/assets/miu-logo.jpg";
 
 export const Route = createFileRoute("/")({
@@ -24,7 +25,15 @@ function StudioPage() {
     pastedContent: "",
   });
   const [deck, setDeck] = useState<SlideDeck | null>(null);
-  const [phase, setPhase] = useState<"idle" | "outline" | "done">("idle");
+  const [phase, setPhase] = useState<"idle" | "outline" | "organizing" | "done">(
+    "idle",
+  );
+  // Optional AI-organization pass (on by default). It only regroups /
+  // retitles the content the rule-based parser already extracted — it
+  // never invents new facts. If the free AI service is unreachable for
+  // any reason, generation still succeeds using the rule-based layout.
+  const [aiAssist, setAiAssist] = useState(true);
+  const [aiApplied, setAiApplied] = useState(false);
 
   const update = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -35,6 +44,7 @@ function StudioPage() {
     if (mode === "paste" && form.pastedContent.trim().length < 20)
       return toast.error("Paste some course material first");
     setDeck(null);
+    setAiApplied(false);
     setPhase("outline");
     try {
       // In "paste" mode, the parser extracts topic/course identification
@@ -59,9 +69,35 @@ function StudioPage() {
           : { ...form, mode };
 
       const d = await generateDeck({ data: payload });
-      setDeck(d);
-      setPhase("done");
-      toast.success(`Deck ready — ${d.slides.length} slides`);
+
+      if (!aiAssist) {
+        setDeck(d);
+        setPhase("done");
+        toast.success(`Deck ready — ${d.slides.length} slides`);
+        return;
+      }
+
+      // AI organization is additive and best-effort: if it fails for any
+      // reason (offline, service down, unparseable response), we fall
+      // back to the rule-based deck we already have instead of failing
+      // the whole generation.
+      setPhase("organizing");
+      try {
+        const organized = await aiOrganizeDeck(d);
+        setDeck(organized);
+        setAiApplied(true);
+        setPhase("done");
+        toast.success(
+          `Deck ready — ${organized.slides.length} slides, AI-organized`,
+        );
+      } catch (aiError) {
+        console.error(aiError);
+        setDeck(d);
+        setPhase("done");
+        toast.message(
+          "AI organization unavailable — used the rule-based layout instead",
+        );
+      }
     } catch (e) {
       console.error(e);
       toast.error(e instanceof Error ? e.message : "Generation failed");
@@ -102,7 +138,9 @@ function StudioPage() {
           </div>
           <div className="hidden sm:flex items-center gap-2 rounded-full bg-white/15 px-3 py-1.5 text-xs">
             <Sparkles className="h-3.5 w-3.5" />
-            No AI • Works offline
+            {aiAssist
+              ? "AI-assisted organization (free, optional)"
+              : "Rule-based • Works offline"}
           </div>
         </div>
       </header>
@@ -156,7 +194,7 @@ function StudioPage() {
                   <input
                     type="number"
                     min={4}
-                    max={20}
+                    max={24}
                     value={form.slideCount}
                     onChange={(e) =>
                       update("slideCount", parseInt(e.target.value) || 10)
@@ -254,14 +292,37 @@ function StudioPage() {
             </div>
           )}
 
+          <label className="mt-4 flex items-start gap-2.5 rounded-lg border bg-muted/40 px-3 py-2.5 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={aiAssist}
+              onChange={(e) => setAiAssist(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="block font-medium text-foreground">
+                AI-assisted organization
+              </span>
+              <span className="block text-muted-foreground mt-0.5">
+                Free, keyless AI regroups and retitles slides for better
+                flow. It never adds facts that aren't in your input — if
+                it's unreachable, your deck still generates normally.
+              </span>
+            </span>
+          </label>
+
           <button
             onClick={handleGenerate}
-            disabled={phase === "outline"}
-            className="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60 transition"
+            disabled={phase === "outline" || phase === "organizing"}
+            className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60 transition"
           >
             {phase === "outline" ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" /> Building deck…
+              </>
+            ) : phase === "organizing" ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> AI organizing…
               </>
             ) : (
               <>
@@ -286,6 +347,9 @@ function StudioPage() {
           {phase === "outline" && (
             <SkeletonState label="Structuring your deck…" />
           )}
+          {phase === "organizing" && (
+            <SkeletonState label="AI is organizing your slides…" />
+          )}
           {deck && (
             <div className="space-y-5">
               <div className="flex items-center justify-between">
@@ -294,6 +358,7 @@ function StudioPage() {
                   <p className="text-sm text-muted-foreground">
                     {deck.slides.length} slides • {deck.courseCode}{" "}
                     {deck.courseName}
+                    {aiApplied && " • AI-organized"}
                   </p>
                 </div>
               </div>
