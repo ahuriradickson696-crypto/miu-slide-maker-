@@ -8,7 +8,7 @@ import { z } from "zod";
 // UI and the .pptx export don't need to know how the deck was produced.
 
 const MAX_PASTE_CHARS = 12000;
-const GEMINI_MODEL = "gemini-1.5-flash"; // Stable production model with native structured JSON output support
+const GEMINI_MODEL = "gemini-1.5-flash"; // Stable model with excellent structured output support
 
 // ---------- Input validation ----------
 
@@ -118,7 +118,7 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
 }
 
 // ---------- Gemini structured output schema ----------
-// Matches OpenAPI 3.0 schema standard expected by the v1 API endpoint
+// Matches OpenAPI 3.0 schema standard expected by the v1beta API endpoint
 
 const responseSchema = {
   type: "OBJECT",
@@ -239,8 +239,8 @@ async function fetchGeminiOnce(
   apiKey: string,
   prompt: string,
 ): Promise<Record<string, unknown>> {
-  // Using the stable production 'v1' API endpoint instead of the unstable v1beta
-  const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  // Using the v1beta API endpoint which correctly parses responseSchema and responseMimeType in standard projects
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -276,7 +276,6 @@ async function fetchGeminiOnce(
   if (!res.ok) {
     let errorDetail = "";
     try {
-      // Parse the real error body returned by Google API gateway to discover schema or parameter formatting issues.
       const errorJson = await res.json();
       errorDetail = errorJson?.error?.message || JSON.stringify(errorJson);
     } catch {
