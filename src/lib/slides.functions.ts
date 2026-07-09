@@ -3,20 +3,15 @@ import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TEXT_MODEL = "gemini-3.5-flash";
-// Image generation uses Pollinations (free, unauthenticated) exclusively.
-// Gemini's image models (Nano Banana) currently have no free-tier quota —
-// on a free GEMINI_API_KEY every call to them fails with 429/403, so
-// attempting them first just adds latency and wasted retries before
-// falling back anyway. Skipping straight to Pollinations keeps image
-// generation fast and fully free.
-const USE_GEMINI_IMAGES = false;
-const IMAGE_MODELS = ["gemini-3.1-flash-image", "gemini-2.5-flash-image"] as const;
 
 const MAX_PASTE_CHARS = 12000;
 const FETCH_TIMEOUT_MS = 45_000;
-const MAX_RETRIES = 4;
-const SLIDES_PER_BATCH = 5; // keeps each Gemini call small & fast
-const BATCH_CONCURRENCY = 2; // bounded parallelism, avoids bursting rate limits
+const MAX_RETRIES = 5;
+// Max slideCount is 24, so this guarantees the whole deck's content is
+// written in a SINGLE call instead of several small batches. Fewer calls
+// = far less chance of tripping a free-tier per-minute request quota.
+const SLIDES_PER_BATCH = 24;
+const BATCH_CONCURRENCY = 1; // only ever one batch now, kept for clarity
 
 // ---------- Schemas sent to Gemini for guaranteed-valid JSON ----------
 
@@ -68,9 +63,8 @@ const SLIDE_BATCH_SCHEMA = {
               required: ["heading", "description"],
             },
           },
-          illustrationPrompt: { type: "string" },
         },
-        required: ["type", "title", "illustrationPrompt"],
+        required: ["type", "title"],
       },
     },
   },
@@ -105,7 +99,6 @@ export type SlideSpec = {
   body?: string;
   bullets?: string[];
   sections?: { heading: string; description: string }[];
-  illustrationPrompt: string;
 };
 
 export type SlideDeck = {
@@ -140,7 +133,6 @@ function clampSlide(spec: SlideSpec): SlideSpec {
       heading: s.heading.slice(0, MAX_SECTION_HEADING_CHARS),
       description: s.description.slice(0, MAX_SECTION_DESC_CHARS),
     })),
-    illustrationPrompt: spec.illustrationPrompt || "",
   };
 }
 
@@ -201,9 +193,9 @@ async function callGemini(
         throw new Error("Invalid GEMINI_API_KEY, insufficient permissions, or billing required for this model.");
       }
       if (res.status === 429) {
-        // Free-tier Gemini quota is tight and shared across text + image
-        // calls. Give it real retry headroom before surfacing anything to
-        // the user — most 429s clear within a few seconds.
+        // Free-tier Gemini quota is tight. Give it real retry headroom
+        // before surfacing anything to the user — most 429s clear within
+        // a few seconds.
         if (attempt === retries - 1) {
           throw new Error(
             "Gemini usage limit reached for now. This means your API key has hit its request quota (common on the free tier). Wait a minute and try again, use fewer slides per deck, or check your plan/billing at https://aistudio.google.com/apikey."
@@ -233,10 +225,13 @@ async function callGemini(
         throw new Error("Couldn't reach the AI service after several attempts. Please check your connection and try again.");
       }
     }
-    // 429s get longer backoff since quota windows typically reset on the order of tens of seconds.
+    // 429s get much longer backoff since free-tier quota windows typically
+    // reset on the order of 30-60s. This schedule gives a transient rate
+    // limit real breathing room to clear before anything reaches the user,
+    // while staying inside a single serverless function's time budget.
     const isRateLimit = lastError instanceof Error && lastError.message.startsWith("Rate limited");
-    const base = isRateLimit ? 4000 : 2000;
-    const backoffMs = Math.min(base * 2 ** attempt, 20_000) + Math.floor(Math.random() * 300);
+    const base = isRateLimit ? 5000 : 2000;
+    const backoffMs = Math.min(base * 2 ** attempt, 15_000) + Math.floor(Math.random() * 300);
     await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
   throw lastError instanceof Error ? lastError : new Error("Gemini request failed after retries.");
@@ -277,8 +272,7 @@ async function runBatches<T, R>(items: T[], concurrency: number, worker: (item: 
 
 const SCHEMA_HINT = `Rules:
 - Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
-- At most 4 sections OR 6 bullets per slide (never both on the same slide).
-- Every slide MUST have a non-empty illustrationPrompt describing a clean flat vector illustration (no text, no logos).`;
+- At most 4 sections OR 6 bullets per slide (never both on the same slide).`;
 
 // ---------- Public server functions ----------
 
@@ -376,78 +370,4 @@ export const regenerateSlide = createServerFn({ method: "POST" })
     const slide = result.slides?.[0];
     if (!slide) throw new Error("Model returned no slide.");
     return { slide: clampSlide({ ...slide, type: data.slideType }) };
-  });
-
-// ---------- Image generation with layered fallback ----------
-
-const IllustrationInput = z.object({ prompt: z.string().min(2) });
-
-function buildStyledPrompt(prompt: string) {
-  return `Minimal flat vector illustration, educational, professional, clean white background, muted green (#0F7A3A) and red (#C8102E) accent palette, no text, no letters, no logos, no watermarks. Subject: ${prompt}`;
-}
-
-async function tryGeminiImage(styled: string, model: string): Promise<{ dataUrl: string } | null> {
-  try {
-    const res = await callGemini(
-      model,
-      {
-        contents: [{ role: "user", parts: [{ text: styled }] }],
-        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-      },
-      { retries: 3, timeoutMs: 30_000 }
-    );
-    const json = (await res.json()) as {
-      candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[];
-    };
-    const parts = json.candidates?.[0]?.content?.parts ?? [];
-    const imagePart = parts.find((p) => p.inlineData?.data);
-    if (!imagePart?.inlineData?.data) return null;
-    const mimeType = imagePart.inlineData.mimeType || "image/png";
-    return { dataUrl: `data:${mimeType};base64,${imagePart.inlineData.data}` };
-  } catch (err) {
-    console.error(`Gemini image model ${model} failed:`, err instanceof Error ? err.message : err);
-    return null;
-  }
-}
-
-async function tryPollinationsImage(prompt: string, retries = 3): Promise<{ dataUrl: string } | null> {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const seed = Math.floor(Math.random() * 1_000_000);
-      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=800&height=800&seed=${seed}&nologo=true`;
-      const res = await fetchWithTimeout(url, {}, 25_000);
-      if (res.ok) {
-        const arrayBuffer = await res.arrayBuffer();
-        const base64 = Buffer.from(arrayBuffer).toString("base64");
-        return { dataUrl: `data:image/jpeg;base64,${base64}` };
-      }
-      if (res.status !== 429 && res.status < 500) return null; // non-retryable client error
-    } catch (err) {
-      if (attempt === retries - 1) {
-        console.error("Pollinations image generation failed:", err instanceof Error ? err.message : err);
-      }
-    }
-    if (attempt < retries - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
-    }
-  }
-  return null;
-}
-
-export const generateIllustration = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => IllustrationInput.parse(data))
-  .handler(async ({ data }) => {
-    const styled = buildStyledPrompt(data.prompt);
-
-    if (USE_GEMINI_IMAGES) {
-      for (const model of IMAGE_MODELS) {
-        const result = await tryGeminiImage(styled, model);
-        if (result) return result;
-      }
-    }
-
-    const fallback = await tryPollinationsImage(styled);
-    if (fallback) return fallback;
-
-    throw new Error("Image generation failed on all providers. The slide will use a placeholder.");
   });
