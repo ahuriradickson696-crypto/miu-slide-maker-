@@ -13,11 +13,15 @@ export default defineConfig({
       srcDirectory: "src",
       server: { entry: "./src/server.ts" },
     }),
-    // Explicitly target Vercel. Relying on Nitro's build-time auto-detection
-    // of the Vercel environment has been unreliable in practice and can
-    // silently fall back to a preset Vercel can't serve, producing 404s
-    // on every route.
-    nitro({ preset: "vercel" }),
+    nitro({
+      preset: "vercel",
+      vercel: {
+        // Deck generation for large slide counts can take a while even with
+        // batching. Raise the ceiling so Vercel doesn't kill the function
+        // mid-request (that "crash" is a 504 timeout, not an app bug).
+        functions: { maxDuration: 60 },
+      },
+    }),
     viteReact(),
   ],
 });
