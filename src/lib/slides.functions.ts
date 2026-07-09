@@ -9,12 +9,15 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// Fallback chain of candidate models to guarantee execution in all regions and key types
+// Expanded fallback chain of candidate models to guarantee execution in all regions, setups, and key types
 const GEMINI_MODELS = [
   "gemini-1.5-flash",
+  "gemini-1.5-flash-latest",
   "gemini-2.5-flash",
   "gemini-1.5-flash-8b",
   "gemini-1.5-pro",
+  "gemini-1.5-pro-latest",
+  "gemini-2.5-pro",
 ];
 
 // ---------- Input validation ----------
@@ -364,6 +367,7 @@ async function callGemini(
   prompt: string,
 ): Promise<Record<string, unknown>> {
   let lastError: unknown;
+  let allModelsUnavailable = true;
 
   // Sequentially try all supported models from the candidate array
   for (const model of GEMINI_MODELS) {
@@ -372,6 +376,11 @@ async function callGemini(
         return await fetchGeminiOnce(apiKey, prompt, model);
       } catch (err) {
         lastError = err;
+
+        // If the error is NOT model-not-found (404), it means the endpoint was reached but failed for other reasons (like rate limits, 400 bad JSON)
+        if (!(err instanceof GeminiError && err.message.startsWith("MODEL_NOT_FOUND"))) {
+          allModelsUnavailable = false;
+        }
 
         // If the API returns a 404 (model not found), abort retries for this model immediately 
         // and hop to the next candidate model in the chain.
@@ -393,7 +402,15 @@ async function callGemini(
     }
   }
   
-  if (lastError instanceof Error) throw lastError;
+  if (lastError instanceof Error) {
+    // If every single model endpoint returned 404, capture it and throw a helpful diagnostic error.
+    if (allModelsUnavailable && lastError.message.startsWith("MODEL_NOT_FOUND")) {
+      throw new GeminiError(
+        "All attempted Gemini models (including Flash and Pro variants) returned 404 Not Found. This typically indicates your API key is restricted, the Generative Language API is disabled in your project, or your current region/IP address is geoblocked by Google. Please check your regional availability or verify your key configuration in Google AI Studio."
+      );
+    }
+    throw lastError;
+  }
   throw new GeminiError("Gemini generation failed on all attempts. Please verify your keys and network.");
 }
 
