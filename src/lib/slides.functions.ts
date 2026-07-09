@@ -3,17 +3,20 @@ import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TEXT_MODEL = "gemini-3.5-flash";
-// Primary image model, with a legacy fallback if the primary is ever
-// unavailable in a given project/region, and a final non-Gemini fallback
-// (Pollinations, unauthenticated) so image generation never hard-fails
-// a whole deck just because of Gemini quota/billing on image output.
+// Image generation uses Pollinations (free, unauthenticated) exclusively.
+// Gemini's image models (Nano Banana) currently have no free-tier quota —
+// on a free GEMINI_API_KEY every call to them fails with 429/403, so
+// attempting them first just adds latency and wasted retries before
+// falling back anyway. Skipping straight to Pollinations keeps image
+// generation fast and fully free.
+const USE_GEMINI_IMAGES = false;
 const IMAGE_MODELS = ["gemini-3.1-flash-image", "gemini-2.5-flash-image"] as const;
 
 const MAX_PASTE_CHARS = 12000;
 const FETCH_TIMEOUT_MS = 45_000;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 4;
 const SLIDES_PER_BATCH = 5; // keeps each Gemini call small & fast
-const BATCH_CONCURRENCY = 3; // bounded parallelism, avoids bursting rate limits
+const BATCH_CONCURRENCY = 2; // bounded parallelism, avoids bursting rate limits
 
 // ---------- Schemas sent to Gemini for guaranteed-valid JSON ----------
 
@@ -197,21 +200,43 @@ async function callGemini(
       if (res.status === 403) {
         throw new Error("Invalid GEMINI_API_KEY, insufficient permissions, or billing required for this model.");
       }
-      if (!isRetryableStatus(res.status) || attempt === retries - 1) {
-        const t = await res.text().catch(() => "");
-        throw new Error(`AI error ${res.status}: ${t.slice(0, 300)}`);
+      if (res.status === 429) {
+        // Free-tier Gemini quota is tight and shared across text + image
+        // calls. Give it real retry headroom before surfacing anything to
+        // the user — most 429s clear within a few seconds.
+        if (attempt === retries - 1) {
+          throw new Error(
+            "Gemini usage limit reached for now. This means your API key has hit its request quota (common on the free tier). Wait a minute and try again, use fewer slides per deck, or check your plan/billing at https://aistudio.google.com/apikey."
+          );
+        }
+        lastError = new Error("Rate limited, retrying...");
+      } else if (!isRetryableStatus(res.status)) {
+        throw new Error(`AI request failed (${res.status}). Please try again in a moment.`);
+      } else if (attempt === retries - 1) {
+        throw new Error(`AI service is temporarily unavailable (${res.status}). Please try again shortly.`);
+      } else {
+        lastError = new Error(`AI error ${res.status}, retrying...`);
       }
-      // fall through to retry
-      lastError = new Error(`AI error ${res.status}, retrying...`);
     } catch (err) {
       lastError = err;
-      // Auth errors and non-network Error()s we explicitly threw above should not retry.
-      if (err instanceof Error && (err.message.startsWith("Invalid GEMINI_API_KEY") || err.message.startsWith("AI error") && !err.message.match(/AI error (429|500|502|503|504)/))) {
+      // Errors we explicitly threw above (clean, user-facing) should not retry further.
+      if (
+        err instanceof Error &&
+        (err.message.startsWith("Invalid GEMINI_API_KEY") ||
+          err.message.startsWith("Gemini usage limit reached") ||
+          err.message.startsWith("AI request failed") ||
+          err.message.startsWith("AI service is temporarily unavailable"))
+      ) {
         throw err;
       }
-      if (attempt === retries - 1) throw err;
+      if (attempt === retries - 1) {
+        throw new Error("Couldn't reach the AI service after several attempts. Please check your connection and try again.");
+      }
     }
-    const backoffMs = Math.min(2000 * 2 ** attempt, 15_000) + Math.floor(Math.random() * 300);
+    // 429s get longer backoff since quota windows typically reset on the order of tens of seconds.
+    const isRateLimit = lastError instanceof Error && lastError.message.startsWith("Rate limited");
+    const base = isRateLimit ? 4000 : 2000;
+    const backoffMs = Math.min(base * 2 ** attempt, 20_000) + Math.floor(Math.random() * 300);
     await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
   throw lastError instanceof Error ? lastError : new Error("Gemini request failed after retries.");
@@ -270,7 +295,8 @@ Rules:
 - Final slide MUST be type "takeaway".
 - Middle slides mix "content" and "list" types.
 - Output exactly ${data.slideCount} entries in slideOutline, in slide order.
-- Fill topic/courseName/courseCode/courseLevel/creditUnits/contactTime from the input if present, else use "".`;
+- Carefully scan the input for course identification details, which are often given as labeled lines near the top of course material (e.g. "Course Code:", "Course Name:", "Credit Units:", "Level:", "Contact Hours:", "Semester:"). Extract these exactly as written wherever present.
+- Fill topic/courseName/courseCode/courseLevel/creditUnits/contactTime from what you find in the input. If a field genuinely isn't present anywhere in the input, use "" — do not invent or guess values.`;
 
     const outlineUserMsg =
       data.mode === "paste"
@@ -368,7 +394,7 @@ async function tryGeminiImage(styled: string, model: string): Promise<{ dataUrl:
         contents: [{ role: "user", parts: [{ text: styled }] }],
         generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
       },
-      { retries: 2, timeoutMs: 30_000 }
+      { retries: 3, timeoutMs: 30_000 }
     );
     const json = (await res.json()) as {
       candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[];
@@ -384,19 +410,28 @@ async function tryGeminiImage(styled: string, model: string): Promise<{ dataUrl:
   }
 }
 
-async function tryPollinationsImage(prompt: string): Promise<{ dataUrl: string } | null> {
-  try {
-    const seed = Math.floor(Math.random() * 1_000_000);
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=800&height=800&seed=${seed}&nologo=true`;
-    const res = await fetchWithTimeout(url, {}, 20_000);
-    if (!res.ok) return null;
-    const arrayBuffer = await res.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
-    return { dataUrl: `data:image/jpeg;base64,${base64}` };
-  } catch (err) {
-    console.error("Pollinations fallback failed:", err instanceof Error ? err.message : err);
-    return null;
+async function tryPollinationsImage(prompt: string, retries = 3): Promise<{ dataUrl: string } | null> {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const seed = Math.floor(Math.random() * 1_000_000);
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=800&height=800&seed=${seed}&nologo=true`;
+      const res = await fetchWithTimeout(url, {}, 25_000);
+      if (res.ok) {
+        const arrayBuffer = await res.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString("base64");
+        return { dataUrl: `data:image/jpeg;base64,${base64}` };
+      }
+      if (res.status !== 429 && res.status < 500) return null; // non-retryable client error
+    } catch (err) {
+      if (attempt === retries - 1) {
+        console.error("Pollinations image generation failed:", err instanceof Error ? err.message : err);
+      }
+    }
+    if (attempt < retries - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+    }
   }
+  return null;
 }
 
 export const generateIllustration = createServerFn({ method: "POST" })
@@ -404,13 +439,13 @@ export const generateIllustration = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const styled = buildStyledPrompt(data.prompt);
 
-    // Try each Gemini image model in order, then fall back to an
-    // unauthenticated third-party generator so a Gemini image outage or
-    // missing billing doesn't take down illustrations for the whole deck.
-    for (const model of IMAGE_MODELS) {
-      const result = await tryGeminiImage(styled, model);
-      if (result) return result;
+    if (USE_GEMINI_IMAGES) {
+      for (const model of IMAGE_MODELS) {
+        const result = await tryGeminiImage(styled, model);
+        if (result) return result;
+      }
     }
+
     const fallback = await tryPollinationsImage(styled);
     if (fallback) return fallback;
 
