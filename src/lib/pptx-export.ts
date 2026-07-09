@@ -73,7 +73,7 @@ function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, l
   });
 }
 
-function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string, illus?: string) {
+function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string) {
   slide.background = { color: WHITE };
   slide.addText("COURSE IDENTIFICATION DETAILS", {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -91,13 +91,12 @@ function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: str
     slide.addText([
       { text: k + " ", options: { bold: true, color: RED } },
       { text: v, options: { color: DARK } },
-    ], { x: 1.25, y, w: illus ? 5.2 : 8.2, h: 0.45, fontSize: 15, fontFace: "Calibri", valign: "middle", fit: "shrink" });
+    ], { x: 1.25, y, w: 8.2, h: 0.45, fontSize: 15, fontFace: "Calibri", valign: "middle", fit: "shrink" });
   });
-  if (illus) slide.addImage({ data: illus, x: 6.7, y: 1.2, w: 2.8, h: 2.8 });
   addFooter(slide, logo);
 }
 
-function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string, illus?: string) {
+function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 24, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -110,7 +109,7 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string, il
     y += 0.4;
   }
   y = Math.max(y, 1.35);
-  const contentW = illus ? 5.4 : 8.5;
+  const contentW = 8.5;
   const remainingH = CONTENT_BOTTOM - y;
 
   // Body takes a proportional slice of the remaining space, sections/bullets take the rest.
@@ -149,11 +148,10 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string, il
     );
   }
 
-  if (illus) slide.addImage({ data: illus, x: 6.2, y: 1.35, w: 3.3, h: 3.3 });
   addFooter(slide, logo);
 }
 
-function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string, illus?: string) {
+function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -169,16 +167,12 @@ function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string, i
   const h = Math.max(0.5, CONTENT_BOTTOM - y);
   slide.addText(
     items.map((b) => ({ text: b, options: { bullet: { code: "2713" }, color: DARK } })),
-    { x: 0.5, y, w: illus ? 5.5 : 8.5, h, fontSize: 14, fontFace: "Calibri", paraSpaceAfter: 8, fit: "shrink" },
+    { x: 0.5, y, w: 8.5, h, fontSize: 14, fontFace: "Calibri", paraSpaceAfter: 8, fit: "shrink" },
   );
-  if (illus) slide.addImage({ data: illus, x: 6.3, y, w: 3.2, h: Math.min(3.2, h) });
   addFooter(slide, logo);
 }
 
-export async function exportDeckToPptx(
-  deck: SlideDeck,
-  illustrations: (string | null)[],
-): Promise<void> {
+export async function exportDeckToPptx(deck: SlideDeck): Promise<void> {
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
   pptx.defineLayout({ name: "STD", width: 10, height: 5.63 });
@@ -188,13 +182,12 @@ export async function exportDeckToPptx(
 
   const logo = await urlToBase64(logoAsset);
 
-  deck.slides.forEach((spec, i) => {
+  deck.slides.forEach((spec) => {
     const slide = pptx.addSlide();
-    const illus = illustrations[i] ?? undefined;
     if (spec.type === "title") renderTitle(slide, spec, deck, logo);
-    else if (spec.type === "identification") renderIdentification(slide, deck, logo, illus);
-    else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo, illus);
-    else renderContent(slide, spec, logo, illus);
+    else if (spec.type === "identification") renderIdentification(slide, deck, logo);
+    else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo);
+    else renderContent(slide, spec, logo);
   });
 
   const safe = deck.topic.replace(/[^a-z0-9]+/gi, "_").slice(0, 40);
