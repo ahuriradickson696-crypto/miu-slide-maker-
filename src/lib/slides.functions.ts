@@ -8,7 +8,7 @@ import { z } from "zod";
 // UI and the .pptx export don't need to know how the deck was produced.
 
 const MAX_PASTE_CHARS = 12000;
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-1.5-flash"; // Stable production model with native structured JSON output support
 
 // ---------- Input validation ----------
 
@@ -118,8 +118,7 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
 }
 
 // ---------- Gemini structured output schema ----------
-// Mirrors SlideDeck/SlideSpec so Gemini returns something we can use
-// directly (Gemini's responseSchema uses OpenAPI-style type names).
+// Matches OpenAPI 3.0 schema standard expected by the v1 API endpoint
 
 const responseSchema = {
   type: "OBJECT",
@@ -228,8 +227,8 @@ write accurate, well-organized lecture content on this topic.`;
 
 class GeminiError extends Error {}
 
-const REQUEST_TIMEOUT_MS = 20_000; // per attempt — keeps total well under typical serverless function limits
-const MAX_ATTEMPTS = 2; // worst case ≈ 2×20s + a short backoff, comfortably under a 60s function timeout
+const REQUEST_TIMEOUT_MS = 20_000; 
+const MAX_ATTEMPTS = 2; 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 function sleep(ms: number) {
@@ -240,7 +239,8 @@ async function fetchGeminiOnce(
   apiKey: string,
   prompt: string,
 ): Promise<Record<string, unknown>> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  // Using the stable production 'v1' API endpoint instead of the unstable v1beta
+  const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -274,24 +274,33 @@ async function fetchGeminiOnce(
   }
 
   if (!res.ok) {
+    let errorDetail = "";
+    try {
+      // Parse the real error body returned by Google API gateway to discover schema or parameter formatting issues.
+      const errorJson = await res.json();
+      errorDetail = errorJson?.error?.message || JSON.stringify(errorJson);
+    } catch {
+      errorDetail = await res.text().catch(() => "");
+    }
+
     if (res.status === 400 || res.status === 403) {
       throw new GeminiError(
-        "Gemini rejected the request — double-check that your API key is valid and has the Generative Language API enabled.",
+        `Gemini rejected the request (${res.status}). Gateway Reason: ${errorDetail || "Invalid key configuration or Generative Language API is disabled."}`,
       );
     }
     if (res.status === 404) {
       throw new GeminiError(
-        `Gemini model "${GEMINI_MODEL}" isn't available for this key/region.`,
+        `Gemini model "${GEMINI_MODEL}" is not available for this key/region configuration.`,
       );
     }
     if (res.status === 429) {
       throw new GeminiError(
-        "Gemini's free-tier rate limit was hit. Wait a moment and try again.",
+        "Gemini's rate limit was hit. Wait a moment and try again.",
       );
     }
-    const bodyText = await res.text().catch(() => "");
+    
     const err = new GeminiError(
-      `Gemini request failed (${res.status}). ${bodyText.slice(0, 200)}`,
+      `Gemini request failed (${res.status}). ${errorDetail.slice(0, 200)}`,
     );
     (err as GeminiError & { status?: number }).status = res.status;
     throw err;
