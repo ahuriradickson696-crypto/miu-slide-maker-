@@ -238,7 +238,6 @@ write accurate, well-organized lecture content on this topic.`;
 class GeminiError extends Error {}
 
 const REQUEST_TIMEOUT_MS = 20_000; 
-const MAX_ATTEMPTS = 2; 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 function sleep(ms: number) {
@@ -293,20 +292,22 @@ async function fetchGeminiOnce(
     }
 
     if (res.status === 404) {
-      // Throw custom token prefix so callGemini knows to bypass retry and fall back to the next model
       throw new GeminiError(
         `MODEL_NOT_FOUND: Model "${modelName}" is unavailable in your region or layout setup.`,
       );
     }
 
+    if (res.status === 429) {
+      const limitErr = new GeminiError(
+        "Gemini's rate limit was hit. Wait a moment and try again.",
+      );
+      (limitErr as GeminiError & { status?: number }).status = 429;
+      throw limitErr;
+    }
+
     if (res.status === 400 || res.status === 403) {
       throw new GeminiError(
         `Gemini rejected the request (${res.status}). Gateway Reason: ${errorDetail || "Invalid key configuration or Generative Language API is disabled."}`,
-      );
-    }
-    if (res.status === 429) {
-      throw new GeminiError(
-        "Gemini's rate limit was hit. Wait a moment and try again.",
       );
     }
     
@@ -371,16 +372,14 @@ async function callGemini(
 
   // Sequentially try all supported models from the candidate array
   for (const model of GEMINI_MODELS) {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const modelMaxAttempts = 3; // Retry more times per model to leverage backoff before fallback jumping
+
+    for (let attempt = 1; attempt <= modelMaxAttempts; attempt++) {
       try {
         return await fetchGeminiOnce(apiKey, prompt, model);
       } catch (err) {
         lastError = err;
-
-        // If the error is NOT model-not-found (404), it means the endpoint was reached but failed for other reasons (like rate limits, 400 bad JSON)
-        if (!(err instanceof GeminiError && err.message.startsWith("MODEL_NOT_FOUND"))) {
-          allModelsUnavailable = false;
-        }
+        const status = (err as GeminiError & { status?: number })?.status;
 
         // If the API returns a 404 (model not found), abort retries for this model immediately 
         // and hop to the next candidate model in the chain.
@@ -388,7 +387,27 @@ async function callGemini(
           break; 
         }
 
-        const status = (err as GeminiError & { status?: number })?.status;
+        // Endpoint connected successfully (even if it yielded a 429/500 error payload)
+        allModelsUnavailable = false;
+
+        // Active handling of Rate Limits (HTTP 429)
+        if (status === 429) {
+          if (attempt === modelMaxAttempts) {
+            // If we exhausted our retries on 429, the API key is completely rate-limited.
+            // Abort the entire cycle instead of triggering a rapid cascade of 429s across other models.
+            throw new GeminiError(
+              "Your Gemini API key has hit its active rate limit (Too Many Requests). Please wait 30-60 seconds before generating again. If you are on the free tier, note that Google limits requests to 15 per minute."
+            );
+          }
+
+          // Apply adaptive exponential backoff with a randomized jitter multiplier
+          const jitter = Math.random() * 1000;
+          const backoffDelay = 2000 * attempt + jitter; // Try 2s + jitter, then 4s + jitter
+          await sleep(backoffDelay);
+          continue; // Retry this exact model again
+        }
+
+        // General retry criteria for transient issues (5xx errors, networking timeouts)
         const isTimeoutOrNetwork =
           err instanceof GeminiError &&
           /took too long|couldn't reach/i.test(err.message);
@@ -396,8 +415,8 @@ async function callGemini(
           (status !== undefined && RETRYABLE_STATUS.has(status)) ||
           isTimeoutOrNetwork;
         
-        if (!retryable || attempt === MAX_ATTEMPTS) break;
-        await sleep(500 * attempt);
+        if (!retryable || attempt === modelMaxAttempts) break;
+        await sleep(1000 * attempt);
       }
     }
   }
