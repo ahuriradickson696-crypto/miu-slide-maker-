@@ -2,31 +2,21 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 // ✨ ENHANCED WITH: Extended Thinking + Intelligent Analysis + Auto-Structure
-// The AI now:
 // 1. Analyzes content structure BEFORE generating
 // 2. Uses extended thinking to reason through optimal slide flow
 // 3. Auto-detects topics, learning outcomes, prerequisites
-// 4. Intelligently orders slides by cognitive progression
-// 5. Automatically fills missing course details
 
 const MAX_PASTE_CHARS = 12000;
 
-// 🚀 FIX: All Gemini 1.5 models (gemini-1.5-flash, gemini-1.5-flash-8b,
-// gemini-1.5-pro) and their "-latest" aliases were fully shut down by
-// Google in 2026. Every request to them now returns a 404 MODEL_NOT_FOUND.
-//
-// Fix: prioritize the auto-updating alias names. Google hot-swaps what
-// these point to whenever they release a new generation, so you inherit
-// upgrades automatically instead of hardcoding a model string that will
-// eventually be retired again.
+// Prioritize the auto-updating alias names. Google hot-swaps what
+// these point to whenever they release a new generation.
 const GEMINI_MODELS = [
   { name: "gemini-flash-latest", apiVersion: "v1beta" }, // currently -> gemini-3.5-flash
   { name: "gemini-pro-latest", apiVersion: "v1beta" },
   { name: "gemini-3.5-flash", apiVersion: "v1beta" },
 ];
 
-// Fallback: older but still-live stable models (kept in case an alias is
-// briefly unavailable in your region/project)
+// Fallback: older but still-live stable models
 const GEMINI_MODELS_BETA = [
   { name: "gemini-2.5-flash", apiVersion: "v1beta" },
   { name: "gemini-2.5-pro", apiVersion: "v1beta" },
@@ -369,28 +359,24 @@ async function callGeminiWithThinking(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  // 🚀 FIX: Determine appropriate thinking configuration format based on model family
+  // 🚀 THE FIX: Correct property keys and token cap protection!
   const isOlder2_5 = modelConfig.name.includes("2.5");
   const thinkingConfigData = isOlder2_5
-    ? { thinkingBudget: 2500 } // Gemini 2.5 uses thinkingBudget
-    : { thinkingLevel: "high" }; // Gemini 3.x and aliases use thinkingLevel
+    ? { thinkingBudget: 2500 } // Correct field for 2.5
+    : { thinkingLevel: "high" }; // Correct field for 3.x aliases
 
-  // 🚀 FIX: Prevent empty JSON output by establishing clear Token Caps
-  // A missing maxOutputTokens means thinking can consume the entire token space, 
-  // leaving 0 available for responding with actual JSON structure!
   const baseGenerationConfig: Record<string, unknown> = {
     temperature: 0.7,
-    maxOutputTokens: 8192, // Crucial: Reserve enough tokens for actual slide output!
+    maxOutputTokens: 8192, // Crucial limit so reasoning doesn't consume JSON token allowance
     responseMimeType: "application/json",
     responseSchema: schema,
   };
 
-  // Add the properly formatted thinking config only if requested
+  // Assign it to the actual API-supported property "thinkingConfig"
   if (useThinking) {
     baseGenerationConfig.thinkingConfig = thinkingConfigData;
   }
 
-  // Construct request cleanly
   const body = {
     systemInstruction: {
       parts: [
@@ -532,7 +518,6 @@ async function callGeminiWithSmartFallback(
       const message = err instanceof Error ? err.message : String(err);
 
       // Do NOT silently swallow 400 (Bad Request) errors!
-      // If the schema or prompt is strictly invalid, we want to know immediately.
       if (status === 400 && !message.includes("Thinking feature not supported")) {
         console.error(`🚨 Schema/Payload Error on ${modelConfig.name}:`, message);
         throw err;
