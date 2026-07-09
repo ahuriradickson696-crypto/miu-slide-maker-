@@ -14,7 +14,6 @@ const MAX_PASTE_CHARS = 12000;
 // 🚀 FIX: All Gemini 1.5 models (gemini-1.5-flash, gemini-1.5-flash-8b,
 // gemini-1.5-pro) and their "-latest" aliases were fully shut down by
 // Google in 2026. Every request to them now returns a 404 MODEL_NOT_FOUND.
-// That is why every model in your old fallback list failed in sequence.
 //
 // Fix: prioritize the auto-updating alias names. Google hot-swaps what
 // these point to whenever they release a new generation, so you inherit
@@ -370,43 +369,41 @@ async function callGeminiWithThinking(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  // Current Gemini 2.5/3.x models support native "thinking" — no need to
-  // gate this on the model name containing the word "thinking" anymore
-  // (that convention only applied to old experimental 1.5/2.0 models).
-  const shouldUseThinking = useThinking;
+  // 🚀 FIX: Determine appropriate thinking configuration format based on model family
+  const isOlder2_5 = modelConfig.name.includes("2.5");
+  const thinkingConfigData = isOlder2_5
+    ? { thinkingBudget: 2500 } // Gemini 2.5 uses thinkingBudget
+    : { thinkingLevel: "high" }; // Gemini 3.x and aliases use thinkingLevel
 
-  const body = shouldUseThinking
-    ? {
-        systemInstruction: {
-          parts: [
-            {
-              text: "You are an expert curriculum designer. Think deeply and reason through optimal educational structure. Ensure slides follow cognitive learning progression.",
-            },
-          ],
+  // 🚀 FIX: Prevent empty JSON output by establishing clear Token Caps
+  // A missing maxOutputTokens means thinking can consume the entire token space, 
+  // leaving 0 available for responding with actual JSON structure!
+  const baseGenerationConfig: Record<string, unknown> = {
+    temperature: 0.7,
+    maxOutputTokens: 8192, // Crucial: Reserve enough tokens for actual slide output!
+    responseMimeType: "application/json",
+    responseSchema: schema,
+  };
+
+  // Add the properly formatted thinking config only if requested
+  if (useThinking) {
+    baseGenerationConfig.thinkingConfig = thinkingConfigData;
+  }
+
+  // Construct request cleanly
+  const body = {
+    systemInstruction: {
+      parts: [
+        {
+          text: useThinking
+            ? "You are an expert curriculum designer. Think deeply and reason through optimal educational structure. Ensure slides follow cognitive learning progression."
+            : "You are an expert curriculum designer. Ensure slides follow cognitive learning progression and learning science principles.",
         },
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          thinking: { budgetTokens: 2500 },
-          responseMimeType: "application/json",
-          responseSchema: schema,
-        },
-      }
-    : {
-        systemInstruction: {
-          parts: [
-            {
-              text: "You are an expert curriculum designer. Ensure slides follow cognitive learning progression and learning science principles.",
-            },
-          ],
-        },
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          responseMimeType: "application/json",
-          responseSchema: schema,
-        },
-      };
+      ],
+    },
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: baseGenerationConfig,
+  };
 
   try {
     const res = await fetch(url, {
@@ -469,7 +466,6 @@ async function callGeminiWithThinking(
   } catch (err) {
     clearTimeout(timer);
     if (err instanceof GeminiError) {
-      // Ensure the status code persists through the custom error wrapping
       if ((err.message.includes("API Error (400)"))) (err as any).status = 400;
       throw err;
     }
