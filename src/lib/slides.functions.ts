@@ -12,11 +12,17 @@ import { z } from "zod";
 const MAX_PASTE_CHARS = 12000;
 
 // Models to try in order of preference
-// Note: thinking feature only works on specific experimental models
+// Using standard naming that works with Google AI Studio free tier
 const GEMINI_MODELS = [
-  "gemini-1.5-flash",           // Most stable & reliable
-  "gemini-1.5-flash-latest",    // Latest stable version
-  "gemini-2.0-flash",           // Newest (if available)
+  { name: "gemini-1.5-flash", apiVersion: "v1" },
+  { name: "gemini-1.5-pro", apiVersion: "v1" },
+  { name: "gemini-pro", apiVersion: "v1" },
+];
+
+// Fallback: If v1 fails, try v1beta
+const GEMINI_MODELS_BETA = [
+  { name: "gemini-1.5-flash", apiVersion: "v1beta" },
+  { name: "gemini-1.5-pro", apiVersion: "v1beta" },
 ];
 
 // ========== Input validation ==========
@@ -250,42 +256,12 @@ async function analyzeContent(
   const prompt = buildAnalysisPrompt(data);
 
   try {
-    let response: Record<string, unknown>;
-    
-    // Try with thinking first if enabled
-    if (data.enableExtendedThinking) {
-      try {
-        response = await callGeminiWithThinking(
-          apiKey,
-          prompt,
-          analysisSchema,
-          true,
-          "gemini-1.5-flash",
-        );
-      } catch (err) {
-        // Fall back to standard mode if thinking fails
-        if (err instanceof Error && err.message.includes("Thinking feature not supported")) {
-          console.log("⚠️  Thinking not available for analysis, using standard mode...");
-          response = await callGeminiWithThinking(
-            apiKey,
-            prompt,
-            analysisSchema,
-            false,
-            "gemini-1.5-flash",
-          );
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      response = await callGeminiWithThinking(
-        apiKey,
-        prompt,
-        analysisSchema,
-        false,
-        "gemini-1.5-flash",
-      );
-    }
+    const response = await callGeminiWithSmartFallback(
+      apiKey,
+      prompt,
+      analysisSchema,
+      data.enableExtendedThinking,
+    );
 
     return {
       detectedTopic: response.detectedTopic || data.topic || "Lecture",
@@ -391,15 +367,15 @@ async function callGeminiWithThinking(
   prompt: string,
   schema: Record<string, unknown>,
   useThinking: boolean,
-  modelName: string = "gemini-1.5-flash",
+  modelConfig: { name: string; apiVersion: string } = { name: "gemini-1.5-flash", apiVersion: "v1" },
 ): Promise<Record<string, unknown>> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `https://generativelanguage.googleapis.com/${modelConfig.apiVersion}/models/${modelConfig.name}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   // Extended thinking only works on specific experimental models
-  const supportsThinking = modelName.includes("thinking");
+  const supportsThinking = modelConfig.name.includes("thinking");
   const shouldUseThinking = useThinking && supportsThinking;
 
   const body = shouldUseThinking
@@ -456,7 +432,7 @@ async function callGeminiWithThinking(
 
       if (res.status === 404) {
         throw new GeminiError(
-          `MODEL_NOT_FOUND: "${modelName}" unavailable. Retrying...`,
+          `MODEL_NOT_FOUND: "${modelConfig.name}" not available via ${modelConfig.apiVersion}. Trying alternate model...`,
         );
       }
       if (res.status === 400 && errorDetail.includes("thinking")) {
@@ -471,7 +447,7 @@ async function callGeminiWithThinking(
       }
       if (res.status === 400 || res.status === 403) {
         throw new GeminiError(
-          `API Error (${res.status}): ${errorDetail || "Verify API key and enablement."}`,
+          `API Error (${res.status}): ${errorDetail || "Verify API key is valid and has access to Generative Language API."}`,
         );
       }
 
@@ -522,43 +498,95 @@ async function generateSlidesWithFullAnalysis(
   
   let parsed: Record<string, unknown>;
   
-  // Try with thinking first (if enabled)
-  if (data.enableExtendedThinking) {
-    try {
-      parsed = await callGeminiWithThinking(
-        apiKey,
-        prompt,
-        deckSchema,
-        true,
-        "gemini-1.5-flash", // Use a proven model
-      );
-    } catch (err) {
-      // If thinking fails, fall back to standard mode
-      if (err instanceof Error && err.message.includes("Thinking feature not supported")) {
-        console.log("⚠️  Thinking not supported, using standard generation...");
-        parsed = await callGeminiWithThinking(
-          apiKey,
-          prompt,
-          deckSchema,
-          false, // Disable thinking
-          "gemini-1.5-flash",
-        );
-      } else {
-        throw err;
-      }
-    }
-  } else {
-    parsed = await callGeminiWithThinking(
-      apiKey,
-      prompt,
-      deckSchema,
-      false,
-      "gemini-1.5-flash",
-    );
-  }
+  // Use smart fallback to find working model
+  parsed = await callGeminiWithSmartFallback(
+    apiKey,
+    prompt,
+    deckSchema,
+    data.enableExtendedThinking,
+  );
 
   console.log("✓ Slides generated and validated");
   return toSlideDeck(data, analysis, parsed);
+}
+
+// ========== Smart Model Selection with Fallback ==========
+
+async function callGeminiWithSmartFallback(
+  apiKey: string,
+  prompt: string,
+  schema: Record<string, unknown>,
+  useThinking: boolean,
+): Promise<Record<string, unknown>> {
+  // Try models in order with fallback
+  const modelsToTry = [...GEMINI_MODELS, ...GEMINI_MODELS_BETA];
+  let lastError: Error | null = null;
+
+  for (const modelConfig of modelsToTry) {
+    try {
+      console.log(`🔄 Trying model: ${modelConfig.name} (${modelConfig.apiVersion})...`);
+      return await callGeminiWithThinking(
+        apiKey,
+        prompt,
+        schema,
+        useThinking,
+        modelConfig,
+      );
+    } catch (err) {
+      lastError = err;
+      const status = (err as any)?.status;
+      const message = err instanceof Error ? err.message : String(err);
+
+      // If 404, this model isn't available - try next
+      if (status === 404 || message.includes("MODEL_NOT_FOUND")) {
+        console.log(`⚠️  ${modelConfig.name} not available, trying next...`);
+        continue;
+      }
+
+      // If thinking not supported but useThinking was true, try without thinking on same model
+      if (useThinking && message.includes("Thinking feature not supported")) {
+        try {
+          console.log(`⚠️  Thinking not supported, retrying without thinking...`);
+          return await callGeminiWithThinking(
+            apiKey,
+            prompt,
+            schema,
+            false,
+            modelConfig,
+          );
+        } catch (retryErr) {
+          lastError = retryErr;
+          continue;
+        }
+      }
+
+      // Rate limit - wait and retry
+      if (status === 429) {
+        console.log(`⏳ Rate limited, waiting before retry...`);
+        await sleep(5000);
+        continue;
+      }
+
+      // Other errors might be retryable (500s)
+      if (status && [500, 502, 503, 504].includes(status)) {
+        console.log(`⚠️  Server error, retrying...`);
+        await sleep(2000);
+        continue;
+      }
+
+      // If it's a permission error, no point retrying
+      if (message.includes("API key") || message.includes("permission")) {
+        throw err;
+      }
+    }
+  }
+
+  // All models failed
+  throw new GeminiError(
+    lastError instanceof Error
+      ? `All Gemini models exhausted. Last error: ${lastError.message}\n\nTroubleshooting:\n1. Verify your API key is correct (from https://aistudio.google.com/apikey)\n2. Ensure the Generative Language API is enabled in Google Cloud\n3. Check if your region/IP is restricted by Google`
+      : "All models failed. Please check your API key and network.",
+  );
 }
 
 // ========== Response Processing ==========
