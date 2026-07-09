@@ -11,18 +11,18 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// Models to try in order of preference
-// Using standard naming that works with Google AI Studio free tier
+// 🚀 FIX 1: Prioritize v1beta for all models. 
+// v1beta is required for stable "responseSchema" (Structured Outputs) support.
 const GEMINI_MODELS = [
-  { name: "gemini-1.5-flash", apiVersion: "v1" },
-  { name: "gemini-1.5-pro", apiVersion: "v1" },
-  { name: "gemini-pro", apiVersion: "v1" },
+  { name: "gemini-1.5-flash", apiVersion: "v1beta" },
+  { name: "gemini-1.5-flash-8b", apiVersion: "v1beta" }, // Added 8b as it's highly available
+  { name: "gemini-1.5-pro", apiVersion: "v1beta" },
 ];
 
-// Fallback: If v1 fails, try v1beta
+// Fallback: Try "-latest" variants if standard aliases fail
 const GEMINI_MODELS_BETA = [
-  { name: "gemini-1.5-flash", apiVersion: "v1beta" },
-  { name: "gemini-1.5-pro", apiVersion: "v1beta" },
+  { name: "gemini-1.5-flash-latest", apiVersion: "v1beta" },
+  { name: "gemini-1.5-pro-latest", apiVersion: "v1beta" },
 ];
 
 // ========== Input validation ==========
@@ -226,20 +226,7 @@ ANALYZE this material and provide intelligent insights about its structure, prer
 
 ${content}
 
-Return ONLY valid JSON:
-{
-  "detectedTopic": "The primary subject",
-  "keyTopics": ["topic1", "topic2", ...],
-  "learningOutcomes": ["What students should be able to do..."],
-  "estimatedLevel": "Beginner/Intermediate/Advanced",
-  "suggestedStructure": ["Foundation concept", "Building concept", "Advanced application"],
-  "detectedCourseInfo": {
-    "courseName": "if mentioned",
-    "courseCode": "if mentioned"
-  },
-  "contentComplexity": "basic|intermediate|advanced",
-  "recommendedSlideCount": number 8-16
-}
+Return ONLY valid JSON matching the exact schema requirements.
 
 REASONING TO APPLY:
 1. Identify natural cognitive progression (simple → complex)
@@ -264,19 +251,19 @@ async function analyzeContent(
     );
 
     return {
-      detectedTopic: response.detectedTopic || data.topic || "Lecture",
+      detectedTopic: response.detectedTopic as string || data.topic || "Lecture",
       keyTopics: Array.isArray(response.keyTopics) ? response.keyTopics : [],
       learningOutcomes: Array.isArray(response.learningOutcomes)
         ? response.learningOutcomes
         : [],
-      estimatedLevel: response.estimatedLevel || "Intermediate",
+      estimatedLevel: response.estimatedLevel as string || "Intermediate",
       suggestedStructure: Array.isArray(response.suggestedStructure)
         ? response.suggestedStructure
         : [],
-      detectedCourseInfo: response.detectedCourseInfo || {},
-      contentComplexity: response.contentComplexity || "intermediate",
+      detectedCourseInfo: (response.detectedCourseInfo as any) || {},
+      contentComplexity: (response.contentComplexity as any) || "intermediate",
       recommendedSlideCount: Math.min(
-        Math.max(response.recommendedSlideCount || 10, 4),
+        Math.max((response.recommendedSlideCount as number) || 10, 4),
         24,
       ),
     };
@@ -356,7 +343,6 @@ RETURN ONLY: Valid JSON matching the slide schema. No markdown. No explanation.`
 class GeminiError extends Error {}
 
 const REQUEST_TIMEOUT_MS = 30_000;
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -367,7 +353,7 @@ async function callGeminiWithThinking(
   prompt: string,
   schema: Record<string, unknown>,
   useThinking: boolean,
-  modelConfig: { name: string; apiVersion: string } = { name: "gemini-1.5-flash", apiVersion: "v1" },
+  modelConfig: { name: string; apiVersion: string } = { name: "gemini-1.5-flash", apiVersion: "v1beta" },
 ): Promise<Record<string, unknown>> {
   const url = `https://generativelanguage.googleapis.com/${modelConfig.apiVersion}/models/${modelConfig.name}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
@@ -447,7 +433,7 @@ async function callGeminiWithThinking(
       }
       if (res.status === 400 || res.status === 403) {
         throw new GeminiError(
-          `API Error (${res.status}): ${errorDetail || "Verify API key is valid and has access to Generative Language API."}`,
+          `API Error (${res.status}): ${errorDetail || "Verify API key is valid and has access."}`,
         );
       }
 
@@ -471,7 +457,11 @@ async function callGeminiWithThinking(
     return JSON.parse(text) as Record<string, unknown>;
   } catch (err) {
     clearTimeout(timer);
-    if (err instanceof GeminiError) throw err;
+    if (err instanceof GeminiError) {
+      // Ensure the status code persists through the custom error wrapping
+      if ((err.message.includes("API Error (400)"))) (err as any).status = 400;
+      throw err;
+    }
     if (err instanceof Error && err.name === "AbortError") {
       throw new GeminiError("Request timeout. Please try again.");
     }
@@ -536,6 +526,13 @@ async function callGeminiWithSmartFallback(
       lastError = err;
       const status = (err as any)?.status;
       const message = err instanceof Error ? err.message : String(err);
+
+      // 🚀 FIX 2: Do NOT silently swallow 400 (Bad Request) errors! 
+      // If the schema or prompt is strictly invalid, we want to know immediately.
+      if (status === 400 && !message.includes("Thinking feature not supported")) {
+        console.error(`🚨 Schema/Payload Error on ${modelConfig.name}:`, message);
+        throw err; 
+      }
 
       // If 404, this model isn't available - try next
       if (status === 404 || message.includes("MODEL_NOT_FOUND")) {
