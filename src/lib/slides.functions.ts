@@ -62,6 +62,7 @@ export type SlideDeck = {
   creditUnits: string;
   contactTime: string;
   topic: string;
+  suggestedFilename?: string;
   slides: SlideSpec[];
 };
 
@@ -84,10 +85,18 @@ export type ContentAnalysis = {
 };
 
 // ========== Content Clamping (Layout Safety) ==========
-const MAX_BULLETS = 4;
-const MAX_BULLET_CHARS = 60; // ✨ Reduced from 75 to force shorter fragments
-const MAX_BODY_CHARS = 120;  // ✨ Reduced from 180 to enforce minimal text
+const MAX_BULLETS = 5;
+const MAX_BULLET_CHARS = 140; // ✨ Increased to allow explanatory bullets
+const MAX_BODY_CHARS = 300;  // ✨ Increased to allow a deep explanation paragraph
 const MAX_TITLE_CHARS = 50;
+
+function generateSafeFilename(courseName: string, courseCode: string, topic: string): string {
+  const parts = [courseCode, courseName, topic].filter(Boolean);
+  let rawName = parts.join("_");
+  if (!rawName) rawName = "MIU_Lecture_Deck";
+  // Replace invalid filename characters, spaces, and ensure clean formatting
+  return rawName.replace(/[^a-z0-9_-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
 
 function clamp(text: string, max: number): string {
   const t = (text ?? "").toString().trim();
@@ -126,12 +135,13 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
       heading: clamp(typeof s.heading === "string" ? s.heading : "", 35),
       description: clamp(
         typeof s.description === "string" ? s.description : "",
-        80, // ✨ Tighter section descriptions
+        120, // ✨ Deeper section descriptions
       ),
     }));
 
-  // ✨ FIX 1: ULTIMATE MUTUAL EXCLUSIVITY FOR MODERN DESIGN
-  // A modern slide should never have a body paragraph AND bullets.
+  // ✨ FIX 1: STRUCTURED DEEP EXPLANATIONS
+  // Allow an introductory explanation (body) to coexist with supporting details (bullets).
+  // Sections remain mutually exclusive to avoid total UI collision.
   const hasSections = sections.length > 0;
   const hasBullets = bullets.length > 0;
 
@@ -143,14 +153,14 @@ function clampSlide(spec: Record<string, unknown>): SlideSpec {
   let finalBullets = undefined;
   let finalSections = undefined;
 
-  // Strict Hierarchy: Sections override Bullets. Bullets override Body.
+  // Strict Hierarchy: Sections override everything. But Body and Bullets can coexist.
   if (hasSections) {
     finalSections = sections;
     finalBody = undefined; 
     finalBullets = undefined;
   } else if (hasBullets) {
     finalBullets = bullets;
-    finalBody = undefined;
+    // finalBody is preserved, allowing "Deep Explanation Body + Key Point Bullets"
   }
 
   return {
@@ -344,14 +354,13 @@ GENERATION REQUIREMENTS:
   [Slides 3 to ${data.slideCount - 1}] Follow the PROGRESSION MAP closely.
   [Slide ${data.slideCount}] type "takeaway" — 4 essential learner takeaways
 
-CONTENT RULES (MODERN PRESENTATION STYLE - CRITICAL):
-- NO FULL SENTENCES: Write in punchy, TED-talk style fragments (e.g., "Drives user engagement" instead of "This feature helps to drive better user engagement").
-- ULTRA-CONCISE: The instructor will speak to the slides; the slides are purely visual anchors. Do not over-explain.
-- MUTUAL EXCLUSIVITY: A slide must use ONLY 'body' text, ONLY 'bullets', or ONLY 'sections'. Never combine them.
+CONTENT RULES (MODERN PRESENTATION WITH DEEP EXPLANATION):
+- DEEP EXPLANATION: Move beyond basic summaries. Provide profound, analytical explanations of the 'why' and 'how' for each concept.
+- BALANCED STRUCTURE: You MUST combine a 'body' paragraph (for the core deep explanation) with 'bullets' (to break down the key supporting mechanisms).
 - Titles: Maximum 5 words. Make them impactful.
-- Body text: Max ${MAX_BODY_CHARS} characters. Use rarely.
-- Bullets: Max ${MAX_BULLETS} bullets. STRICTLY 3-8 words per bullet.
-- Sections: Max 3 sections. Headings must be 1-3 words. Descriptions must be fragments.
+- Body text: Use this for your deep explanation. Max ${MAX_BODY_CHARS} characters.
+- Bullets: Max ${MAX_BULLETS} bullets. Explain the details clearly (up to 20 words per bullet).
+- Sections: Max 3 sections. Use for comparing concepts. Never mix sections with body/bullets.
 
 ${data.mode === "paste" ? `Source Material:\n"""\n${data.pastedContent}\n"""` : ""}
 
@@ -638,13 +647,22 @@ function toSlideDeck(
 
     const topic = analysis.detectedTopic || data.topic || "Untitled Lecture";
 
+    const finalCourseName = data.courseName || analysis.detectedCourseInfo.courseName || (typeof parsed.courseName === "string" ? parsed.courseName : "") || "MIU_Course";
+    const finalCourseCode = data.courseCode || analysis.detectedCourseInfo.courseCode || (typeof parsed.courseCode === "string" ? parsed.courseCode : "") || "";
+    const finalCourseLevel = data.courseLevel || analysis.detectedCourseInfo.courseLevel || (typeof parsed.courseLevel === "string" ? parsed.courseLevel : "") || "";
+    const finalCreditUnits = data.creditUnits || analysis.detectedCourseInfo.creditUnits || (typeof parsed.creditUnits === "string" ? parsed.creditUnits : "") || "";
+    const finalContactTime = data.contactTime || analysis.detectedCourseInfo.contactTime || (typeof parsed.contactTime === "string" ? parsed.contactTime : "") || "";
+
+    const suggestedFilename = generateSafeFilename(finalCourseName, finalCourseCode, topic) + ".pptx";
+
     return {
-      courseName: data.courseName || analysis.detectedCourseInfo.courseName || (typeof parsed.courseName === "string" ? parsed.courseName : "") || "",
-      courseCode: data.courseCode || analysis.detectedCourseInfo.courseCode || (typeof parsed.courseCode === "string" ? parsed.courseCode : "") || "",
-      courseLevel: data.courseLevel || analysis.detectedCourseInfo.courseLevel || (typeof parsed.courseLevel === "string" ? parsed.courseLevel : "") || "",
-      creditUnits: data.creditUnits || analysis.detectedCourseInfo.creditUnits || (typeof parsed.creditUnits === "string" ? parsed.creditUnits : "") || "",
-      contactTime: data.contactTime || analysis.detectedCourseInfo.contactTime || (typeof parsed.contactTime === "string" ? parsed.contactTime : "") || "",
+      courseName: finalCourseName,
+      courseCode: finalCourseCode,
+      courseLevel: finalCourseLevel,
+      creditUnits: finalCreditUnits,
+      contactTime: finalContactTime,
       topic: clamp(topic, MAX_TITLE_CHARS),
+      suggestedFilename,
       slides,
     };
   } catch (err) {
