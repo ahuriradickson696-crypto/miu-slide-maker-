@@ -1,16 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast, Toaster } from "sonner";
-import { Loader2, Sparkles, Download, FileText, Wand2, ImageIcon } from "lucide-react";
-import { generateDeck, generateIllustration, type SlideDeck } from "@/lib/slides.functions";
+import { Loader2, Sparkles, Download, FileText, Wand2 } from "lucide-react";
+import { generateDeck, type SlideDeck } from "@/lib/slides.functions";
 import { exportDeckToPptx } from "@/lib/pptx-export";
 import logo from "@/assets/miu-logo.jpg";
 
 export const Route = createFileRoute("/")({
   component: StudioPage,
 });
-
-type Illus = (string | null)[];
 
 function StudioPage() {
   const [mode, setMode] = useState<"brief" | "paste">("brief");
@@ -26,9 +24,7 @@ function StudioPage() {
     pastedContent: "",
   });
   const [deck, setDeck] = useState<SlideDeck | null>(null);
-  const [illus, setIllus] = useState<Illus>([]);
-  const [phase, setPhase] = useState<"idle" | "outline" | "images" | "done">("idle");
-  const [progress, setProgress] = useState(0);
+  const [phase, setPhase] = useState<"idle" | "outline" | "done">("idle");
 
   const update = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -38,8 +34,6 @@ function StudioPage() {
     if (mode === "paste" && form.pastedContent.trim().length < 20)
       return toast.error("Paste some course material first");
     setDeck(null);
-    setIllus([]);
-    setProgress(0);
     setPhase("outline");
     try {
       // In "paste" mode, the AI extracts topic/course identification details
@@ -65,25 +59,8 @@ function StudioPage() {
 
       const d = await generateDeck({ data: payload });
       setDeck(d);
-      setIllus(new Array(d.slides.length).fill(null));
-      setPhase("images");
-      toast.success(`Outline ready — ${d.slides.length} slides`);
-
-      const images: Illus = new Array(d.slides.length).fill(null);
-      for (let i = 0; i < d.slides.length; i++) {
-        try {
-          const { dataUrl } = await generateIllustration({
-            data: { prompt: d.slides[i].illustrationPrompt },
-          });
-          images[i] = dataUrl;
-        } catch (e) {
-          console.error("illus fail", i, e);
-        }
-        setIllus([...images]);
-        setProgress(Math.round(((i + 1) / d.slides.length) * 100));
-      }
       setPhase("done");
-      toast.success("All illustrations rendered");
+      toast.success(`Deck ready — ${d.slides.length} slides`);
     } catch (e) {
       console.error(e);
       toast.error(e instanceof Error ? e.message : "Generation failed");
@@ -94,7 +71,7 @@ function StudioPage() {
   async function handleDownload() {
     if (!deck) return;
     try {
-      await exportDeckToPptx(deck, illus);
+      await exportDeckToPptx(deck);
       toast.success("Downloaded PowerPoint file");
     } catch (e) {
       console.error(e);
@@ -233,20 +210,18 @@ function StudioPage() {
                 />
               </Field>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
-                💡 The AI will extract the topic and course details from your text and structure a full MIU-branded deck with illustrations automatically.
+                💡 The AI will extract the topic and course details from your text and structure a full MIU-branded deck automatically.
               </p>
             </div>
           )}
 
           <button
             onClick={handleGenerate}
-            disabled={phase === "outline" || phase === "images"}
+            disabled={phase === "outline"}
             className="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60 transition"
           >
             {phase === "outline" ? (
               <><Loader2 className="h-4 w-4 animate-spin" /> Writing outline…</>
-            ) : phase === "images" ? (
-              <><Loader2 className="h-4 w-4 animate-spin" /> Rendering illustrations {progress}%</>
             ) : (
               <><Sparkles className="h-4 w-4" /> Generate slide deck</>
             )}
@@ -275,15 +250,10 @@ function StudioPage() {
                     {deck.slides.length} slides • {deck.courseCode} {deck.courseName}
                   </p>
                 </div>
-                {phase === "images" && (
-                  <div className="text-xs text-muted-foreground flex items-center gap-2">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Illustrations {progress}%
-                  </div>
-                )}
               </div>
               <div className="grid gap-5 sm:grid-cols-2">
                 {deck.slides.map((s, i) => (
-                  <SlideCard key={i} index={i} spec={s} deck={deck} illus={illus[i]} />
+                  <SlideCard key={i} index={i} spec={s} deck={deck} />
                 ))}
               </div>
             </div>
@@ -326,7 +296,7 @@ function EmptyState() {
       <FileText className="mx-auto h-10 w-10 text-primary/60" />
       <h3 className="mt-3 font-semibold text-foreground">Start with a topic on the left</h3>
       <p className="mt-1 text-sm">
-        We'll write the outline, illustrate each slide, and export a MIU-branded PowerPoint you can present or edit.
+        We'll write the outline and export a MIU-branded PowerPoint you can present or edit.
       </p>
     </div>
   );
@@ -342,12 +312,11 @@ function SkeletonState({ label }: { label: string }) {
 }
 
 function SlideCard({
-  index, spec, deck, illus,
+  index, spec, deck,
 }: {
   index: number;
   spec: SlideDeck["slides"][number];
   deck: SlideDeck;
-  illus: string | null;
 }) {
   const isTitle = spec.type === "title";
   return (
@@ -371,8 +340,8 @@ function SlideCard({
           <div className="absolute inset-0 p-4 flex flex-col">
             <div className="text-[11px] font-bold text-[#0F7A3A] uppercase tracking-wide">{spec.title}</div>
             {spec.subtitle && <div className="text-[9px] italic text-[#C8102E] mt-0.5">{spec.subtitle}</div>}
-            <div className="flex-1 flex gap-3 mt-2 min-h-0">
-              <div className="flex-1 text-[9px] text-slate-700 space-y-1.5 overflow-hidden">
+            <div className="flex-1 mt-2 min-h-0">
+              <div className="text-[9px] text-slate-700 space-y-1.5 overflow-hidden">
                 {spec.body && <p className="line-clamp-3">{spec.body}</p>}
                 {spec.sections?.slice(0, 3).map((s, i) => (
                   <div key={i}>
@@ -384,13 +353,6 @@ function SlideCard({
                   <ul className="list-disc pl-3 space-y-0.5">
                     {spec.bullets.slice(0, 5).map((b, i) => <li key={i} className="line-clamp-1">{b}</li>)}
                   </ul>
-                )}
-              </div>
-              <div className="w-20 h-20 shrink-0 rounded-md bg-muted flex items-center justify-center overflow-hidden">
-                {illus ? (
-                  <img src={illus} alt="" className="w-full h-full object-cover" />
-                ) : (
-                  <ImageIcon className="h-5 w-5 text-muted-foreground/50 animate-pulse" />
                 )}
               </div>
             </div>
