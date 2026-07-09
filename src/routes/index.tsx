@@ -30,16 +30,17 @@ function StudioPage() {
     setForm((f) => ({ ...f, [k]: v }));
 
   async function handleGenerate() {
-    if (mode === "brief" && !form.topic.trim()) return toast.error("Please enter a topic");
+    if (mode === "brief" && !form.topic.trim())
+      return toast.error("Please enter a topic");
     if (mode === "paste" && form.pastedContent.trim().length < 20)
       return toast.error("Paste some course material first");
     setDeck(null);
     setPhase("outline");
     try {
-      // In "paste" mode, the AI extracts topic/course identification details
-      // directly from the pasted text. Any leftover values from the "brief"
-      // tab (or earlier edits) must NOT be sent here, or they'd silently
-      // override what the AI correctly detected — only the explicit,
+      // In "paste" mode, the parser extracts topic/course identification
+      // details directly from the pasted text. Any leftover values from the
+      // "brief" tab (or earlier edits) must NOT be sent here, or they'd
+      // silently override what was correctly detected — only the explicit,
       // visible "Course code (optional override)" field is allowed through.
       const payload =
         mode === "paste"
@@ -86,16 +87,22 @@ function StudioPage() {
       {/* Header */}
       <header className="miu-gradient text-primary-foreground">
         <div className="mx-auto max-w-7xl px-6 py-5 flex items-center gap-4">
-          <img src={logo} alt="MIU logo" className="h-14 w-14 rounded-xl bg-white p-1 shadow-lg" />
+          <img
+            src={logo}
+            alt="MIU logo"
+            className="h-14 w-14 rounded-xl bg-white p-1 shadow-lg"
+          />
           <div className="flex-1">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
               Metropolitan International University
             </h1>
-            <p className="text-sm opacity-90">Slide Studio — AI Lecture Deck Generator</p>
+            <p className="text-sm opacity-90">
+              Slide Studio — Lecture Deck Generator
+            </p>
           </div>
           <div className="hidden sm:flex items-center gap-2 rounded-full bg-white/15 px-3 py-1.5 text-xs">
             <Sparkles className="h-3.5 w-3.5" />
-            Powered by Gemini
+            No AI • Works offline
           </div>
         </div>
       </header>
@@ -139,7 +146,11 @@ function StudioPage() {
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Course code">
-                  <Input value={form.courseCode} onChange={(v) => update("courseCode", v)} placeholder="e.g. BEE 1101" />
+                  <Input
+                    value={form.courseCode}
+                    onChange={(v) => update("courseCode", v)}
+                    placeholder="e.g. BEE 1101"
+                  />
                 </Field>
                 <Field label="Slides">
                   <input
@@ -147,22 +158,40 @@ function StudioPage() {
                     min={4}
                     max={20}
                     value={form.slideCount}
-                    onChange={(e) => update("slideCount", parseInt(e.target.value) || 10)}
+                    onChange={(e) =>
+                      update("slideCount", parseInt(e.target.value) || 10)
+                    }
                     className="w-full rounded-lg border bg-background px-3 py-2 text-sm"
                   />
                 </Field>
               </div>
               <Field label="Course name">
-                <Input value={form.courseName} onChange={(v) => update("courseName", v)} placeholder="e.g. Communication Skills" />
+                <Input
+                  value={form.courseName}
+                  onChange={(v) => update("courseName", v)}
+                  placeholder="e.g. Communication Skills"
+                />
               </Field>
               <Field label="Course level">
-                <Input value={form.courseLevel} onChange={(v) => update("courseLevel", v)} placeholder="e.g. Undergraduate-Degree (Year One, Semester One)" />
+                <Input
+                  value={form.courseLevel}
+                  onChange={(v) => update("courseLevel", v)}
+                  placeholder="e.g. Undergraduate-Degree (Year One, Semester One)"
+                />
               </Field>
               <Field label="Credit units">
-                <Input value={form.creditUnits} onChange={(v) => update("creditUnits", v)} placeholder="e.g. 3 Credit Units | Total Contact Hours: 45" />
+                <Input
+                  value={form.creditUnits}
+                  onChange={(v) => update("creditUnits", v)}
+                  placeholder="e.g. 3 Credit Units | Total Contact Hours: 45"
+                />
               </Field>
               <Field label="Contact time">
-                <Input value={form.contactTime} onChange={(v) => update("contactTime", v)} placeholder="e.g. Allocated Contact Time: 3 Hours" />
+                <Input
+                  value={form.contactTime}
+                  onChange={(v) => update("contactTime", v)}
+                  placeholder="e.g. Allocated Contact Time: 3 Hours"
+                />
               </Field>
               <Field label="Extra guidance (optional)">
                 <textarea
@@ -176,12 +205,15 @@ function StudioPage() {
             </div>
           ) : (
             <div className="space-y-3">
-              <Field label="Paste everything — notes, textbook chapter, outline" required>
+              <Field
+                label="Paste everything — notes, textbook chapter, outline"
+                required
+              >
                 <textarea
                   value={form.pastedContent}
                   onChange={(e) => update("pastedContent", e.target.value)}
                   rows={14}
-                  placeholder="Drop your full lecture notes, a chapter, or a rough outline here. The AI will read it, extract the topic and course details, and design the deck for you."
+                  placeholder="Drop your full lecture notes, a chapter, or a rough outline here. Use headings (or ALL CAPS lines / lines ending in ':') to mark section breaks — each becomes a slide."
                   className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </Field>
@@ -192,12 +224,18 @@ function StudioPage() {
                     min={4}
                     max={24}
                     value={form.slideCount}
-                    onChange={(e) => update("slideCount", parseInt(e.target.value) || 10)}
+                    onChange={(e) =>
+                      update("slideCount", parseInt(e.target.value) || 10)
+                    }
                     className="w-full rounded-lg border bg-background px-3 py-2 text-sm"
                   />
                 </Field>
                 <Field label="Course code (optional override)">
-                  <Input value={form.courseCode} onChange={(v) => update("courseCode", v)} placeholder="Leave blank to auto-detect from your text" />
+                  <Input
+                    value={form.courseCode}
+                    onChange={(v) => update("courseCode", v)}
+                    placeholder="Leave blank to auto-detect from your text"
+                  />
                 </Field>
               </div>
               <Field label="Extra guidance (optional)">
@@ -210,7 +248,8 @@ function StudioPage() {
                 />
               </Field>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
-                💡 The AI will extract the topic and course details from your text and structure a full MIU-branded deck automatically.
+                💡 Labeled lines like "Course Code:" or "Credit Units:" are
+                detected automatically and won't show up as slide content.
               </p>
             </div>
           )}
@@ -221,9 +260,13 @@ function StudioPage() {
             className="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60 transition"
           >
             {phase === "outline" ? (
-              <><Loader2 className="h-4 w-4 animate-spin" /> Writing outline…</>
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Building deck…
+              </>
             ) : (
-              <><Sparkles className="h-4 w-4" /> Generate slide deck</>
+              <>
+                <Sparkles className="h-4 w-4" /> Generate slide deck
+              </>
             )}
           </button>
 
@@ -240,14 +283,17 @@ function StudioPage() {
         {/* Preview */}
         <section>
           {!deck && phase === "idle" && <EmptyState />}
-          {phase === "outline" && <SkeletonState label="Structuring your lecture…" />}
+          {phase === "outline" && (
+            <SkeletonState label="Structuring your deck…" />
+          )}
           {deck && (
             <div className="space-y-5">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-semibold">{deck.topic}</h2>
                   <p className="text-sm text-muted-foreground">
-                    {deck.slides.length} slides • {deck.courseCode} {deck.courseName}
+                    {deck.slides.length} slides • {deck.courseCode}{" "}
+                    {deck.courseName}
                   </p>
                 </div>
               </div>
@@ -262,24 +308,42 @@ function StudioPage() {
       </main>
 
       <footer className="mx-auto max-w-7xl px-6 py-8 text-xs text-muted-foreground border-t mt-8">
-        Metropolitan International University • www.miu.ac.ug • Kampala • Mbarara • Kisoro Campuses
+        Metropolitan International University • www.miu.ac.ug • Kampala •
+        Mbarara • Kisoro Campuses
       </footer>
     </div>
   );
 }
 
-function Field({ label, children, required }: { label: string; children: React.ReactNode; required?: boolean }) {
+function Field({
+  label,
+  children,
+  required,
+}: {
+  label: string;
+  children: React.ReactNode;
+  required?: boolean;
+}) {
   return (
     <label className="block">
       <span className="mb-1 block text-xs font-medium text-muted-foreground">
-        {label}{required && <span className="text-accent"> *</span>}
+        {label}
+        {required && <span className="text-accent"> *</span>}
       </span>
       {children}
     </label>
   );
 }
 
-function Input({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+function Input({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
   return (
     <input
       value={value}
@@ -294,9 +358,12 @@ function EmptyState() {
   return (
     <div className="rounded-2xl border-2 border-dashed p-10 text-center text-muted-foreground">
       <FileText className="mx-auto h-10 w-10 text-primary/60" />
-      <h3 className="mt-3 font-semibold text-foreground">Start with a topic on the left</h3>
+      <h3 className="mt-3 font-semibold text-foreground">
+        Start with a topic on the left
+      </h3>
       <p className="mt-1 text-sm">
-        We'll write the outline and export a MIU-branded PowerPoint you can present or edit.
+        We'll write the outline and export a MIU-branded PowerPoint you can
+        present or edit.
       </p>
     </div>
   );
@@ -312,7 +379,9 @@ function SkeletonState({ label }: { label: string }) {
 }
 
 function SlideCard({
-  index, spec, deck,
+  index,
+  spec,
+  deck,
 }: {
   index: number;
   spec: SlideDeck["slides"][number];
@@ -327,19 +396,36 @@ function SlideCard({
       >
         {isTitle ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-            <img src={logo} alt="" className="h-16 w-16 rounded-lg bg-white p-1 mb-3" />
-            <div className="text-[10px] font-bold tracking-wider">METROPOLITAN INTERNATIONAL UNIVERSITY</div>
+            <img
+              src={logo}
+              alt=""
+              className="h-16 w-16 rounded-lg bg-white p-1 mb-3"
+            />
+            <div className="text-[10px] font-bold tracking-wider">
+              METROPOLITAN INTERNATIONAL UNIVERSITY
+            </div>
             <div className="mt-1 text-lg font-semibold">{spec.title}</div>
             <div className="mt-3 flex gap-2 flex-wrap justify-center">
               {[deck.courseCode, deck.courseName].filter(Boolean).map((p) => (
-                <span key={p} className="rounded-md bg-[#C8102E] px-2 py-0.5 text-[10px] font-bold">{p}</span>
+                <span
+                  key={p}
+                  className="rounded-md bg-[#C8102E] px-2 py-0.5 text-[10px] font-bold"
+                >
+                  {p}
+                </span>
               ))}
             </div>
           </div>
         ) : (
           <div className="absolute inset-0 p-4 flex flex-col">
-            <div className="text-[11px] font-bold text-[#0F7A3A] uppercase tracking-wide">{spec.title}</div>
-            {spec.subtitle && <div className="text-[9px] italic text-[#C8102E] mt-0.5">{spec.subtitle}</div>}
+            <div className="text-[11px] font-bold text-[#0F7A3A] uppercase tracking-wide">
+              {spec.title}
+            </div>
+            {spec.subtitle && (
+              <div className="text-[9px] italic text-[#C8102E] mt-0.5">
+                {spec.subtitle}
+              </div>
+            )}
             <div className="flex-1 mt-2 min-h-0">
               <div className="text-[9px] text-slate-700 space-y-1.5 overflow-hidden">
                 {spec.body && <p className="line-clamp-3">{spec.body}</p>}
@@ -351,7 +437,11 @@ function SlideCard({
                 ))}
                 {spec.bullets && (
                   <ul className="list-disc pl-3 space-y-0.5">
-                    {spec.bullets.slice(0, 5).map((b, i) => <li key={i} className="line-clamp-1">{b}</li>)}
+                    {spec.bullets.slice(0, 5).map((b, i) => (
+                      <li key={i} className="line-clamp-1">
+                        {b}
+                      </li>
+                    ))}
                   </ul>
                 )}
               </div>
@@ -364,7 +454,9 @@ function SlideCard({
       </div>
       <div className="px-3 py-2 flex items-center justify-between text-xs bg-muted/40">
         <span className="text-muted-foreground">Slide {index + 1}</span>
-        <span className="font-mono text-[10px] uppercase text-primary">{spec.type}</span>
+        <span className="font-mono text-[10px] uppercase text-primary">
+          {spec.type}
+        </span>
       </div>
     </div>
   );
