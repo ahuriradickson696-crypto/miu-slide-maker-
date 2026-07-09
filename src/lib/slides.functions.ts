@@ -251,11 +251,13 @@ async function analyzeContent(
   const prompt = buildAnalysisPrompt(data);
 
   try {
+    // Phase 1 is just classification/structuring — it doesn't need
+    // extended thinking, and skipping it here roughly halves total latency.
     const response = await callGeminiWithSmartFallback(
       apiKey,
       prompt,
       analysisSchema,
-      data.enableExtendedThinking,
+      false,
     );
 
     return {
@@ -385,7 +387,7 @@ async function callGeminiWithThinking(
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.7,
-          thinking: { budgetTokens: 8000 },
+          thinking: { budgetTokens: 2500 },
           responseMimeType: "application/json",
           responseSchema: schema,
         },
