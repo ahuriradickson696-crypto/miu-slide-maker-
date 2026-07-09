@@ -11,19 +11,26 @@ const MUTED = "6B7280";
 // Slide is 5.63in tall; footer starts at 5.05, so all content must stay above this line.
 const CONTENT_BOTTOM = 4.95;
 
-async function urlToBase64(url: string): Promise<string> {
-  const res = await fetch(url);
-  const blob = await res.blob();
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+async function urlToBase64(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("logo read failed"));
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
 }
 
-function addFooter(slide: PptxGenJS.Slide, logo: string) {
-  slide.addImage({ data: logo, x: 0.35, y: 5.05, w: 0.45, h: 0.45 });
+function addFooter(slide: PptxGenJS.Slide, logo: string | null) {
+  if (logo) {
+    slide.addImage({ data: logo, x: 0.35, y: 5.05, w: 0.45, h: 0.45 });
+  }
   slide.addText("Metropolitan International University", {
     x: 0.85,
     y: 5.05,
@@ -45,9 +52,11 @@ function addFooter(slide: PptxGenJS.Slide, logo: string) {
   });
 }
 
-function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, logo: string) {
+function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, logo: string | null) {
   slide.background = { color: GREEN };
-  slide.addImage({ data: logo, x: 4.35, y: 0.4, w: 1.3, h: 1.3, rounding: true });
+  if (logo) {
+    slide.addImage({ data: logo, x: 4.35, y: 0.4, w: 1.3, h: 1.3, rounding: true });
+  }
   slide.addText("METROPOLITAN INTERNATIONAL UNIVERSITY", {
     x: 0.5, y: 1.9, w: 9, h: 0.5,
     fontSize: 26, bold: true, color: WHITE, align: "center", fontFace: "Calibri", fit: "shrink",
@@ -73,7 +82,7 @@ function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, l
   });
 }
 
-function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string) {
+function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText("COURSE IDENTIFICATION DETAILS", {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -96,7 +105,7 @@ function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: str
   addFooter(slide, logo);
 }
 
-function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
+function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 24, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -151,7 +160,7 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
   addFooter(slide, logo);
 }
 
-function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
+function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
     x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
@@ -173,23 +182,41 @@ function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string) {
 }
 
 export async function exportDeckToPptx(deck: SlideDeck): Promise<void> {
+  if (!deck || !Array.isArray(deck.slides) || deck.slides.length === 0) {
+    throw new Error("There's nothing to export yet — generate a deck first.");
+  }
+
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
   pptx.defineLayout({ name: "STD", width: 10, height: 5.63 });
   pptx.layout = "STD";
-  pptx.title = `${deck.topic} — ${deck.courseCode}`;
+  const topic = deck.topic || "Untitled Lecture";
+  pptx.title = `${topic}${deck.courseCode ? ` — ${deck.courseCode}` : ""}`;
   pptx.company = "Metropolitan International University";
 
+  // A failed logo fetch shouldn't block the whole export — slides just
+  // render without the corner/footer logo in that case.
   const logo = await urlToBase64(logoAsset);
 
-  deck.slides.forEach((spec) => {
-    const slide = pptx.addSlide();
-    if (spec.type === "title") renderTitle(slide, spec, deck, logo);
-    else if (spec.type === "identification") renderIdentification(slide, deck, logo);
-    else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo);
-    else renderContent(slide, spec, logo);
+  let rendered = 0;
+  deck.slides.forEach((spec, i) => {
+    try {
+      const slide = pptx.addSlide();
+      if (spec.type === "title") renderTitle(slide, spec, deck, logo);
+      else if (spec.type === "identification") renderIdentification(slide, deck, logo);
+      else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo);
+      else renderContent(slide, spec, logo);
+      rendered++;
+    } catch (err) {
+      // Skip the one bad slide rather than aborting the whole export.
+      console.error(`Failed to render slide ${i + 1}:`, err);
+    }
   });
 
-  const safe = deck.topic.replace(/[^a-z0-9]+/gi, "_").slice(0, 40);
+  if (rendered === 0) {
+    throw new Error("None of the slides could be rendered. Please try generating the deck again.");
+  }
+
+  const safe = topic.replace(/[^a-z0-9]+/gi, "_").slice(0, 40);
   await pptx.writeFile({ fileName: `${safe || "MIU_Deck"}.pptx` });
 }
