@@ -339,9 +339,38 @@ RETURN ONLY: Valid JSON matching the slide schema. No markdown. No explanation.`
 
 // ========== Gemini API Integration ==========
 
-class GeminiError extends Error {}
+/**
+ * status: HTTP-style status code for the failure, when known. Attached at the
+ * throw site (not recovered later via string-matching on the message).
+ * code: a machine-checkable reason, used instead of matching on message text.
+ */
+type GeminiErrorCode =
+  | "MODEL_NOT_FOUND"
+  | "THINKING_UNSUPPORTED"
+  | "RATE_LIMITED"
+  | "AUTH"
+  | "BAD_REQUEST"
+  | "SERVER_ERROR"
+  | "TIMEOUT"
+  | "EMPTY_RESPONSE"
+  | "PARSE_ERROR"
+  | "UNKNOWN";
 
-const REQUEST_TIMEOUT_MS = 30_000;
+class GeminiError extends Error {
+  status?: number;
+  code: GeminiErrorCode;
+  constructor(message: string, code: GeminiErrorCode = "UNKNOWN", status?: number) {
+    super(message);
+    this.name = "GeminiError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+// Thinking-enabled calls need real headroom: a 24-slide deck with
+// thinkingLevel "high" routinely runs well past 30s.
+const REQUEST_TIMEOUT_MS = 45_000;
+const REQUEST_TIMEOUT_MS_THINKING = 90_000;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -357,13 +386,16 @@ async function callGeminiWithThinking(
   const url = `https://generativelanguage.googleapis.com/${modelConfig.apiVersion}/models/${modelConfig.name}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutMs = useThinking ? REQUEST_TIMEOUT_MS_THINKING : REQUEST_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // 🚀 THE FIX: Correct property keys and token cap protection!
+  // Gemini 3.x models use thinkingLevel; Gemini 2.5 models use thinkingBudget.
+  // Sending the wrong one for a given model is a guaranteed 400, so this
+  // must stay in sync with which models are in GEMINI_MODELS/_BETA.
   const isOlder2_5 = modelConfig.name.includes("2.5");
   const thinkingConfigData = isOlder2_5
-    ? { thinkingBudget: 2500 } // Correct field for 2.5
-    : { thinkingLevel: "high" }; // Correct field for 3.x aliases
+    ? { thinkingBudget: 2500 } // Gemini 2.5 field
+    : { thinkingLevel: "high" }; // Gemini 3.x field
 
   const baseGenerationConfig: Record<string, unknown> = {
     temperature: 0.7,
@@ -372,7 +404,6 @@ async function callGeminiWithThinking(
     responseSchema: schema,
   };
 
-  // Assign it to the actual API-supported property "thinkingConfig"
   if (useThinking) {
     baseGenerationConfig.thinkingConfig = thinkingConfigData;
   }
@@ -413,29 +444,44 @@ async function callGeminiWithThinking(
       if (res.status === 404) {
         throw new GeminiError(
           `MODEL_NOT_FOUND: "${modelConfig.name}" not available via ${modelConfig.apiVersion}. Trying alternate model...`,
+          "MODEL_NOT_FOUND",
+          404,
         );
       }
-      if (res.status === 400 && errorDetail.includes("thinking")) {
+      if (res.status === 400 && /thinking/i.test(errorDetail)) {
         throw new GeminiError(
-          `Thinking feature not supported. Using standard mode...`,
+          `Thinking feature not supported on ${modelConfig.name}. Using standard mode...`,
+          "THINKING_UNSUPPORTED",
+          400,
         );
       }
       if (res.status === 429) {
-        const err = new GeminiError("Rate limited. Applying backoff...");
-        (err as any).status = 429;
-        throw err;
+        throw new GeminiError(
+          "Rate limited. Applying backoff...",
+          "RATE_LIMITED",
+          429,
+        );
       }
-      if (res.status === 400 || res.status === 403) {
+      if (res.status === 401 || res.status === 403) {
         throw new GeminiError(
           `API Error (${res.status}): ${errorDetail || "Verify API key is valid and has access."}`,
+          "AUTH",
+          res.status,
+        );
+      }
+      if (res.status === 400) {
+        throw new GeminiError(
+          `API Error (400): ${errorDetail || "Malformed request for this model."}`,
+          "BAD_REQUEST",
+          400,
         );
       }
 
-      const err = new GeminiError(
+      throw new GeminiError(
         `Gemini request failed (${res.status}): ${errorDetail.slice(0, 200)}`,
+        "SERVER_ERROR",
+        res.status,
       );
-      (err as any).status = res.status;
-      throw err;
     }
 
     const json = await res.json();
@@ -445,21 +491,32 @@ async function callGeminiWithThinking(
       : "";
 
     if (!text.trim()) {
-      throw new GeminiError("Gemini returned empty response. Retrying...");
+      throw new GeminiError(
+        "Gemini returned empty response. Retrying...",
+        "EMPTY_RESPONSE",
+      );
     }
 
-    return JSON.parse(text) as Record<string, unknown>;
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new GeminiError(
+        "Gemini returned malformed JSON. Retrying...",
+        "PARSE_ERROR",
+      );
+    }
   } catch (err) {
     clearTimeout(timer);
-    if (err instanceof GeminiError) {
-      if ((err.message.includes("API Error (400)"))) (err as any).status = 400;
-      throw err;
-    }
+    if (err instanceof GeminiError) throw err;
     if (err instanceof Error && err.name === "AbortError") {
-      throw new GeminiError("Request timeout. Please try again.");
+      throw new GeminiError(
+        `Request to ${modelConfig.name} timed out after ${timeoutMs / 1000}s.`,
+        "TIMEOUT",
+      );
     }
     throw new GeminiError(
       err instanceof Error ? err.message : "Unknown error calling Gemini",
+      "UNKNOWN",
     );
   }
 }
@@ -498,9 +555,8 @@ async function callGeminiWithSmartFallback(
   schema: Record<string, unknown>,
   useThinking: boolean,
 ): Promise<Record<string, unknown>> {
-  // Try models in order with fallback
   const modelsToTry = [...GEMINI_MODELS, ...GEMINI_MODELS_BETA];
-  let lastError: Error | null = null;
+  let lastError: GeminiError | Error | null = null;
 
   for (const modelConfig of modelsToTry) {
     try {
@@ -514,64 +570,58 @@ async function callGeminiWithSmartFallback(
       );
     } catch (err) {
       lastError = err as Error;
-      const status = (err as any)?.status;
-      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof GeminiError ? err.code : "UNKNOWN";
 
-      // Do NOT silently swallow 400 (Bad Request) errors!
-      if (status === 400 && !message.includes("Thinking feature not supported")) {
-        console.error(`🚨 Schema/Payload Error on ${modelConfig.name}:`, message);
+      // Bad API key / no permission: retrying other models won't help.
+      if (code === "AUTH") {
         throw err;
       }
 
-      // If 404, this model isn't available - try next
-      if (status === 404 || message.includes("MODEL_NOT_FOUND")) {
+      // Model doesn't exist under this alias/version — try the next one.
+      if (code === "MODEL_NOT_FOUND") {
         console.log(`⚠️  ${modelConfig.name} not available, trying next...`);
         continue;
       }
 
-      // If thinking not supported but useThinking was true, try without thinking on same model
-      if (useThinking && message.includes("Thinking feature not supported")) {
+      // This model doesn't support the thinking field we sent — retry the
+      // SAME model once without thinking before moving on.
+      if (useThinking && code === "THINKING_UNSUPPORTED") {
         try {
-          console.log(`⚠️  Thinking not supported, retrying without thinking...`);
-          return await callGeminiWithThinking(
-            apiKey,
-            prompt,
-            schema,
-            false,
-            modelConfig,
-          );
+          console.log(`⚠️  Thinking not supported on ${modelConfig.name}, retrying without thinking...`);
+          return await callGeminiWithThinking(apiKey, prompt, schema, false, modelConfig);
         } catch (retryErr) {
           lastError = retryErr as Error;
           continue;
         }
       }
 
-      // Rate limit - wait and retry
-      if (status === 429) {
-        console.log(`⏳ Rate limited, waiting before retry...`);
+      if (code === "RATE_LIMITED") {
+        console.log(`⏳ Rate limited on ${modelConfig.name}, waiting before retry...`);
         await sleep(5000);
         continue;
       }
 
-      // Other errors might be retryable (500s)
-      if (status && [500, 502, 503, 504].includes(status)) {
-        console.log(`⚠️  Server error, retrying...`);
+      if (code === "SERVER_ERROR") {
+        console.log(`⚠️  Server error on ${modelConfig.name}, retrying...`);
         await sleep(2000);
         continue;
       }
 
-      // If it's a permission error, no point retrying
-      if (message.includes("API key") || message.includes("permission")) {
-        throw err;
-      }
+      // BAD_REQUEST / TIMEOUT / EMPTY_RESPONSE / PARSE_ERROR / UNKNOWN:
+      // don't assume it's fatal for every model (e.g. a payload shape one
+      // model rejects, another accepts). Log and move to the next model
+      // instead of aborting the whole generation.
+      console.warn(`⚠️  ${modelConfig.name} failed (${code}): ${(err as Error).message}. Trying next model...`);
+      continue;
     }
   }
 
-  // All models failed
+  // All models failed.
   throw new GeminiError(
     lastError instanceof Error
       ? `All Gemini models exhausted. Last error: ${lastError.message}\n\nTroubleshooting:\n1. Verify your API key is correct (from https://aistudio.google.com/apikey)\n2. Ensure the Generative Language API is enabled in Google Cloud\n3. Check if your region/IP is restricted by Google`
       : "All models failed. Please check your API key and network.",
+    "UNKNOWN",
   );
 }
 
@@ -593,7 +643,7 @@ function toSlideDeck(
       .filter((s) => s.title || s.body || s.bullets?.length || s.sections?.length);
 
     if (!slides.length) {
-      throw new GeminiError("No usable slides generated. Try again.");
+      throw new GeminiError("No usable slides generated. Try again.", "UNKNOWN");
     }
 
     // Enforce proper slide structure
@@ -645,6 +695,7 @@ function toSlideDeck(
     if (err instanceof GeminiError) throw err;
     throw new GeminiError(
       "Failed to process Gemini response. Please try again.",
+      "UNKNOWN",
     );
   }
 }
