@@ -9,15 +9,11 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// Expanded fallback chain of candidate models to guarantee execution in all regions, setups, and key types
+// Optimized list of essential models to prevent rapid request bloat and rate-limiting
 const GEMINI_MODELS = [
   "gemini-1.5-flash",
-  "gemini-1.5-flash-latest",
   "gemini-2.5-flash",
-  "gemini-1.5-flash-8b",
   "gemini-1.5-pro",
-  "gemini-1.5-pro-latest",
-  "gemini-2.5-pro",
 ];
 
 // ---------- Input validation ----------
@@ -370,9 +366,9 @@ async function callGemini(
   let lastError: unknown;
   let allModelsUnavailable = true;
 
-  // Sequentially try all supported models from the candidate array
+  // Sequentially try our slim fallback list to save resources
   for (const model of GEMINI_MODELS) {
-    const modelMaxAttempts = 3; // Retry more times per model to leverage backoff before fallback jumping
+    const modelMaxAttempts = 2; // Only 2 attempts per model to stay well clear of the gateway limit
 
     for (let attempt = 1; attempt <= modelMaxAttempts; attempt++) {
       try {
@@ -381,33 +377,26 @@ async function callGemini(
         lastError = err;
         const status = (err as GeminiError & { status?: number })?.status;
 
-        // If the API returns a 404 (model not found), abort retries for this model immediately 
-        // and hop to the next candidate model in the chain.
         if (err instanceof GeminiError && err.message.startsWith("MODEL_NOT_FOUND")) {
-          break; 
+          break; // Hop to next model immediately
         }
 
-        // Endpoint connected successfully (even if it yielded a 429/500 error payload)
         allModelsUnavailable = false;
 
-        // Active handling of Rate Limits (HTTP 429)
+        // If rate limited, apply a firm cooldown pause and let the queue clear
         if (status === 429) {
           if (attempt === modelMaxAttempts) {
-            // If we exhausted our retries on 429, the API key is completely rate-limited.
-            // Abort the entire cycle instead of triggering a rapid cascade of 429s across other models.
             throw new GeminiError(
-              "Your Gemini API key has hit its active rate limit (Too Many Requests). Please wait 30-60 seconds before generating again. If you are on the free tier, note that Google limits requests to 15 per minute."
+              "Your Gemini API key has hit Google's active rate limit. Please pause for 15 seconds, check that you are not double-clicking Generate, and try again."
             );
           }
 
-          // Apply adaptive exponential backoff with a randomized jitter multiplier
-          const jitter = Math.random() * 1000;
-          const backoffDelay = 2000 * attempt + jitter; // Try 2s + jitter, then 4s + jitter
+          // Strict backoff delay to allow the server key bucket to refill
+          const backoffDelay = 3500 * attempt; 
           await sleep(backoffDelay);
-          continue; // Retry this exact model again
+          continue; 
         }
 
-        // General retry criteria for transient issues (5xx errors, networking timeouts)
         const isTimeoutOrNetwork =
           err instanceof GeminiError &&
           /took too long|couldn't reach/i.test(err.message);
@@ -416,13 +405,12 @@ async function callGemini(
           isTimeoutOrNetwork;
         
         if (!retryable || attempt === modelMaxAttempts) break;
-        await sleep(1000 * attempt);
+        await sleep(1500 * attempt);
       }
     }
   }
   
   if (lastError instanceof Error) {
-    // If every single model endpoint returned 404, capture it and throw a helpful diagnostic error.
     if (allModelsUnavailable && lastError.message.startsWith("MODEL_NOT_FOUND")) {
       throw new GeminiError(
         "All attempted Gemini models (including Flash and Pro variants) returned 404 Not Found. This typically indicates your API key is restricted, the Generative Language API is disabled in your project, or your current region/IP address is geoblocked by Google. Please check your regional availability or verify your key configuration in Google AI Studio."
@@ -513,8 +501,6 @@ export const generateDeck = createServerFn({ method: "POST" })
       const parsed = await callGemini(data.apiKey.trim(), prompt);
       return toSlideDeck(data, parsed);
     } catch (err) {
-      // Last line of defense: whatever went wrong, surface a clean message
-      // rather than letting a raw/unknown error crash the request.
       if (err instanceof Error && err.message) throw new Error(err.message);
       throw new Error(
         "Something went wrong generating the deck. Please try again.",
