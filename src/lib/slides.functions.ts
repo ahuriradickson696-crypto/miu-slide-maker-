@@ -9,11 +9,10 @@ import { z } from "zod";
 
 const MAX_PASTE_CHARS = 12000;
 
-// Optimized list of essential models to prevent rapid request bloat and rate-limiting
+// Highly available public models. Pro model is removed to prevent triggering regional access blocks.
 const GEMINI_MODELS = [
-  "gemini-1.5-flash",
   "gemini-2.5-flash",
-  "gemini-1.5-pro",
+  "gemini-1.5-flash",
 ];
 
 // ---------- Input validation ----------
@@ -386,13 +385,14 @@ async function callGemini(
         // If rate limited, apply a firm cooldown pause and let the queue clear
         if (status === 429) {
           if (attempt === modelMaxAttempts) {
+            // Immediately back off on 429 to avoid cascade-failing other models
             throw new GeminiError(
-              "Your Gemini API key has hit Google's active rate limit. Please pause for 15 seconds, check that you are not double-clicking Generate, and try again."
+              "Your Gemini API key has hit Google's active rate limit. Please wait 15-30 seconds, ensure you are not double-clicking, and try again."
             );
           }
 
           // Strict backoff delay to allow the server key bucket to refill
-          const backoffDelay = 3500 * attempt; 
+          const backoffDelay = 4000 * attempt; 
           await sleep(backoffDelay);
           continue; 
         }
@@ -413,7 +413,7 @@ async function callGemini(
   if (lastError instanceof Error) {
     if (allModelsUnavailable && lastError.message.startsWith("MODEL_NOT_FOUND")) {
       throw new GeminiError(
-        "All attempted Gemini models (including Flash and Pro variants) returned 404 Not Found. This typically indicates your API key is restricted, the Generative Language API is disabled in your project, or your current region/IP address is geoblocked by Google. Please check your regional availability or verify your key configuration in Google AI Studio."
+        "All attempted Gemini models (including Flash variants) returned 404 Not Found. This typically indicates your API key is restricted, the Generative Language API is disabled in your project, or your current region/IP address is geoblocked by Google. Please check your regional availability or verify your key configuration in Google AI Studio."
       );
     }
     throw lastError;
