@@ -2,11 +2,22 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL = "gemini-3.5-flash"; 
-const MAX_PASTE_CHARS = 12000;
+const TEXT_MODEL = "gemini-3.5-flash";
+// Primary image model, with a legacy fallback if the primary is ever
+// unavailable in a given project/region, and a final non-Gemini fallback
+// (Pollinations, unauthenticated) so image generation never hard-fails
+// a whole deck just because of Gemini quota/billing on image output.
+const IMAGE_MODELS = ["gemini-3.1-flash-image", "gemini-2.5-flash-image"] as const;
 
-// The OpenAPI Schema is passed directly to the Gemini API to guarantee perfect JSON responses.
-const DECK_SCHEMA = {
+const MAX_PASTE_CHARS = 12000;
+const FETCH_TIMEOUT_MS = 45_000;
+const MAX_RETRIES = 3;
+const SLIDES_PER_BATCH = 5; // keeps each Gemini call small & fast
+const BATCH_CONCURRENCY = 3; // bounded parallelism, avoids bursting rate limits
+
+// ---------- Schemas sent to Gemini for guaranteed-valid JSON ----------
+
+const OUTLINE_SCHEMA = {
   type: "object",
   properties: {
     topic: { type: "string" },
@@ -15,43 +26,22 @@ const DECK_SCHEMA = {
     courseLevel: { type: "string" },
     creditUnits: { type: "string" },
     contactTime: { type: "string" },
-    slides: {
+    slideOutline: {
       type: "array",
       items: {
         type: "object",
         properties: {
-          type: {
-            type: "string",
-            enum: ["title", "identification", "content", "list", "takeaway"]
-          },
+          type: { type: "string", enum: ["title", "identification", "content", "list", "takeaway"] },
           title: { type: "string" },
-          subtitle: { type: "string" },
-          body: { type: "string" },
-          bullets: {
-            type: "array",
-            items: { type: "string" }
-          },
-          sections: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                heading: { type: "string" },
-                description: { type: "string" }
-              },
-              required: ["heading", "description"]
-            }
-          },
-          illustrationPrompt: { type: "string" }
         },
-        required: ["type", "title", "illustrationPrompt"]
-      }
-    }
+        required: ["type", "title"],
+      },
+    },
   },
-  required: ["topic", "slides"]
+  required: ["topic", "slideOutline"],
 };
 
-const REGENERATE_SCHEMA = {
+const SLIDE_BATCH_SCHEMA = {
   type: "object",
   properties: {
     slides: {
@@ -59,36 +49,32 @@ const REGENERATE_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          type: {
-            type: "string",
-            enum: ["title", "identification", "content", "list", "takeaway"]
-          },
+          type: { type: "string", enum: ["title", "identification", "content", "list", "takeaway"] },
           title: { type: "string" },
           subtitle: { type: "string" },
           body: { type: "string" },
-          bullets: {
-            type: "array",
-            items: { type: "string" }
-          },
+          bullets: { type: "array", items: { type: "string" } },
           sections: {
             type: "array",
             items: {
               type: "object",
               properties: {
                 heading: { type: "string" },
-                description: { type: "string" }
+                description: { type: "string" },
               },
-              required: ["heading", "description"]
-            }
+              required: ["heading", "description"],
+            },
           },
-          illustrationPrompt: { type: "string" }
+          illustrationPrompt: { type: "string" },
         },
-        required: ["type", "title", "illustrationPrompt"]
-      }
-    }
+        required: ["type", "title", "illustrationPrompt"],
+      },
+    },
   },
-  required: ["slides"]
+  required: ["slides"],
 };
+
+// ---------- Input validation ----------
 
 const GenerateInput = z.object({
   mode: z.enum(["brief", "paste"]).default("brief"),
@@ -129,6 +115,8 @@ export type SlideDeck = {
   slides: SlideSpec[];
 };
 
+// ---------- Content clamping (protects layout & keeps payloads small) ----------
+
 const MAX_BULLETS = 6;
 const MAX_BULLET_CHARS = 100;
 const MAX_SECTIONS = 4;
@@ -144,9 +132,7 @@ function clampSlide(spec: SlideSpec): SlideSpec {
     title: (spec.title || "").slice(0, MAX_TITLE_CHARS),
     subtitle: spec.subtitle ? spec.subtitle.slice(0, MAX_SUBTITLE_CHARS) : spec.subtitle,
     body: spec.body ? spec.body.slice(0, MAX_BODY_CHARS) : spec.body,
-    bullets: spec.bullets
-      ?.slice(0, MAX_BULLETS)
-      .map((b) => b.slice(0, MAX_BULLET_CHARS)),
+    bullets: spec.bullets?.slice(0, MAX_BULLETS).map((b) => b.slice(0, MAX_BULLET_CHARS)),
     sections: spec.sections?.slice(0, MAX_SECTIONS).map((s) => ({
       heading: s.heading.slice(0, MAX_SECTION_HEADING_CHARS),
       description: s.description.slice(0, MAX_SECTION_DESC_CHARS),
@@ -155,12 +141,12 @@ function clampSlide(spec: SlideSpec): SlideSpec {
   };
 }
 
+// ---------- JSON extraction (tolerant of stray markdown fences) ----------
+
 function extractJson(text: string): Record<string, unknown> {
   try {
-    // Attempt parsing directly first (optimal for raw JSON API modes)
     return JSON.parse(text.trim());
-  } catch (err) {
-    // If the response somehow contains markdown markers or other trailing texts
+  } catch {
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     const raw = (fenced ? fenced[1] : text).trim();
     const start = raw.indexOf("{");
@@ -170,117 +156,263 @@ function extractJson(text: string): Record<string, unknown> {
   }
 }
 
-async function handleGeminiErrors(res: Response) {
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    if (res.status === 429) throw new Error("Rate limit — please wait a moment and try again.");
-    if (res.status === 403) throw new Error("Invalid GEMINI_API_KEY or insufficient permissions.");
-    throw new Error(`AI error ${res.status}: ${t}`);
+// ---------- Resilient fetch: timeout + retry with backoff ----------
+
+function isRetryableStatus(status: number) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
   }
 }
 
-async function callGemini(sys: string, userMsg: string, retries = 3, schema?: any) {
+async function callGemini(
+  model: string,
+  body: Record<string, unknown>,
+  { retries = MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS }: { retries?: number; timeoutMs?: number } = {}
+): Promise<Response> {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-  for (let i = 0; i < retries; i++) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent`, {
-      method: "POST",
-      headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: userMsg }] }],
-        system_instruction: {
-          parts: [{ text: sys }]
+  let lastError: unknown;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
         },
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: schema,
-          maxOutputTokens: 8192 // Generous output budget to completely prevent truncation
-        },
-      }),
-    });
+        timeoutMs
+      );
 
-    if (res.status === 429) {
-      const waitTime = Math.pow(2, i) * 2000;
-      await new Promise((resolve) => setTimeout(resolve, waitTime));
-      continue;
+      if (res.ok) return res;
+      if (res.status === 403) {
+        throw new Error("Invalid GEMINI_API_KEY, insufficient permissions, or billing required for this model.");
+      }
+      if (!isRetryableStatus(res.status) || attempt === retries - 1) {
+        const t = await res.text().catch(() => "");
+        throw new Error(`AI error ${res.status}: ${t.slice(0, 300)}`);
+      }
+      // fall through to retry
+      lastError = new Error(`AI error ${res.status}, retrying...`);
+    } catch (err) {
+      lastError = err;
+      // Auth errors and non-network Error()s we explicitly threw above should not retry.
+      if (err instanceof Error && (err.message.startsWith("Invalid GEMINI_API_KEY") || err.message.startsWith("AI error") && !err.message.match(/AI error (429|500|502|503|504)/))) {
+        throw err;
+      }
+      if (attempt === retries - 1) throw err;
     }
-    return res;
+    const backoffMs = Math.min(2000 * 2 ** attempt, 15_000) + Math.floor(Math.random() * 300);
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
-  throw new Error("Rate limit exceeded after retries.");
+  throw lastError instanceof Error ? lastError : new Error("Gemini request failed after retries.");
 }
 
-const SCHEMA_HINT = `Return STRICT JSON conforming to the schema.
-Rules:
+async function generateJson<T>(sys: string, userMsg: string, schema: unknown): Promise<T> {
+  const res = await callGemini(TEXT_MODEL, {
+    contents: [{ role: "user", parts: [{ text: userMsg }] }],
+    system_instruction: { parts: [{ text: sys }] },
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+      maxOutputTokens: 16384,
+    },
+  });
+  const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  if (!text) throw new Error("Model returned an empty response.");
+  return extractJson(text) as T;
+}
+
+// ---------- Bounded-concurrency batch runner ----------
+
+async function runBatches<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function next(): Promise<void> {
+    const i = cursor++;
+    if (i >= items.length) return;
+    results[i] = await worker(items[i], i);
+    return next();
+  }
+  await Promise.all(new Array(Math.min(concurrency, items.length)).fill(0).map(() => next()));
+  return results;
+}
+
+// ---------- Prompts ----------
+
+const SCHEMA_HINT = `Rules:
 - Every slide's content MUST be short enough to fit comfortably on a single fixed-size slide.
-- At most 4 sections OR 5 bullets per slide (never both on the same slide).
-- Slide 1 MUST be type "title", Slide 2 MUST be type "identification", Final slide MUST be type "takeaway".
-- Every slide MUST have a non-empty illustrationPrompt.`;
+- At most 4 sections OR 6 bullets per slide (never both on the same slide).
+- Every slide MUST have a non-empty illustrationPrompt describing a clean flat vector illustration (no text, no logos).`;
+
+// ---------- Public server functions ----------
 
 export const generateDeck = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => GenerateInput.parse(data))
   .handler(async ({ data }) => {
-    const sys = `You are a curriculum designer. ${SCHEMA_HINT}`;
-    const userMsg = data.mode === "paste"
-        ? `Turn raw course material into a ${data.slideCount}-slide deck.\n\nRAW MATERIAL:\n${data.pastedContent}\n\nGUIDANCE: ${data.extraNotes || "(none)"}`
-        : `Design a ${data.slideCount}-slide deck for topic: ${data.topic}`;
+    if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
-    const res = await callGemini(sys, userMsg, 3, DECK_SCHEMA);
-    await handleGeminiErrors(res);
-    const json = (await res.json()) as any;
-    const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const parsed = extractJson(text) as any;
-    
-    if (!parsed.slides?.length) throw new Error("Model returned no slides");
+    // Step 1: fast outline call — decides structure & metadata only.
+    const outlineSys = `You are a curriculum designer for Metropolitan International University (MIU). Design the STRUCTURE of a ${data.slideCount}-slide academic lecture deck.
+Rules:
+- Slide 1 MUST be type "title".
+- Slide 2 MUST be type "identification".
+- Final slide MUST be type "takeaway".
+- Middle slides mix "content" and "list" types.
+- Output exactly ${data.slideCount} entries in slideOutline, in slide order.
+- Fill topic/courseName/courseCode/courseLevel/creditUnits/contactTime from the input if present, else use "".`;
 
-    return {
-      courseName: data.courseName || parsed.courseName || "",
-      courseCode: data.courseCode || parsed.courseCode || "",
-      courseLevel: data.courseLevel || parsed.courseLevel || "",
-      creditUnits: data.creditUnits || parsed.creditUnits || "",
-      contactTime: data.contactTime || parsed.contactTime || "",
-      topic: data.topic || parsed.topic || "Untitled Lecture",
-      slides: parsed.slides.map(clampSlide),
+    const outlineUserMsg =
+      data.mode === "paste"
+        ? `Extract a lecture structure from this raw course material:\n"""\n${data.pastedContent}\n"""\n\nEXTRA GUIDANCE: ${data.extraNotes || "(none)"}`
+        : `TOPIC: ${data.topic}\nCOURSE NAME: ${data.courseName}\nCOURSE CODE: ${data.courseCode}\nCOURSE LEVEL: ${data.courseLevel}\nCREDIT UNITS: ${data.creditUnits}\nCONTACT TIME: ${data.contactTime}\nEXTRA NOTES: ${data.extraNotes}`;
+
+    const outline = await generateJson<{
+      topic?: string;
+      courseName?: string;
+      courseCode?: string;
+      courseLevel?: string;
+      creditUnits?: string;
+      contactTime?: string;
+      slideOutline: { type: SlideSpec["type"]; title: string }[];
+    }>(outlineSys, outlineUserMsg, OUTLINE_SCHEMA);
+
+    if (!outline.slideOutline?.length) throw new Error("Model returned no slide outline.");
+
+    // Step 2: expand each slide's full content in small parallel batches.
+    // Small payloads per call = fast, low truncation risk, and one failed
+    // batch can be retried independently without redoing the whole deck.
+    const batches: { start: number; items: typeof outline.slideOutline }[] = [];
+    for (let i = 0; i < outline.slideOutline.length; i += SLIDES_PER_BATCH) {
+      batches.push({ start: i, items: outline.slideOutline.slice(i, i + SLIDES_PER_BATCH) });
+    }
+
+    const contextLine = data.mode === "paste"
+      ? `Base all content on this source material:\n"""\n${data.pastedContent.slice(0, 6000)}\n"""`
+      : `Topic: ${data.topic}. Extra notes: ${data.extraNotes || "(none)"}`;
+
+    const batchResults = await runBatches(batches, BATCH_CONCURRENCY, async (batch) => {
+      const sys = `You are a curriculum designer for MIU, writing full slide content for specific slides in a lecture deck. ${SCHEMA_HINT}`;
+      const userMsg = `${contextLine}\n\nWrite full content for EXACTLY these ${batch.items.length} slides, in this exact order, preserving each "type" and "title" verbatim:\n${JSON.stringify(batch.items, null, 2)}`;
+      const result = await generateJson<{ slides: SlideSpec[] }>(sys, userMsg, SLIDE_BATCH_SCHEMA);
+      if (!result.slides?.length) throw new Error(`Batch starting at slide ${batch.start + 1} returned no content.`);
+      return result.slides;
+    });
+
+    const slides = batchResults.flat().map((s, i) => {
+      const clamped = clampSlide(s);
+      // Guarantee the outline's structural type/title win, even if the
+      // model drifted, so slide 1/2/last always match required types.
+      const outlineEntry = outline.slideOutline[i];
+      return outlineEntry ? { ...clamped, type: outlineEntry.type, title: clamped.title || outlineEntry.title } : clamped;
+    });
+
+    if (!slides.length) throw new Error("Deck generation produced no slides.");
+
+    const deck: SlideDeck = {
+      courseName: data.courseName || outline.courseName || "",
+      courseCode: data.courseCode || outline.courseCode || "",
+      courseLevel: data.courseLevel || outline.courseLevel || "",
+      creditUnits: data.creditUnits || outline.creditUnits || "",
+      contactTime: data.contactTime || outline.contactTime || "",
+      topic: data.topic || outline.topic || "Untitled Lecture",
+      slides,
     };
+    return deck;
   });
 
+const RegenerateInput = z.object({
+  slideType: z.enum(["title", "identification", "content", "list", "takeaway"]),
+  currentTitle: z.string(),
+  topic: z.string().optional().default(""),
+});
+
 export const regenerateSlide = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.any().parse(data))
+  .inputValidator((data: unknown) => RegenerateInput.parse(data))
   .handler(async ({ data }) => {
-    const sys = `You are a curriculum designer. Write ONE replacement slide of type "${data.slideType}". ${SCHEMA_HINT}`;
-    const res = await callGemini(sys, `Write alternative: ${data.currentTitle}`, 3, REGENERATE_SCHEMA);
-    await handleGeminiErrors(res);
-    const json = (await res.json()) as any;
-    const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const parsed = extractJson(text) as any;
-    const slide = parsed.slides?.[0];
-    if (!slide) throw new Error("Model returned no slide");
+    if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
+    const sys = `You are a curriculum designer. Write ONE replacement slide of type "${data.slideType}" for a deck about "${data.topic}". ${SCHEMA_HINT}`;
+    const result = await generateJson<{ slides: SlideSpec[] }>(
+      sys,
+      `Write an alternative version of a slide currently titled: "${data.currentTitle}"`,
+      SLIDE_BATCH_SCHEMA
+    );
+    const slide = result.slides?.[0];
+    if (!slide) throw new Error("Model returned no slide.");
     return { slide: clampSlide({ ...slide, type: data.slideType }) };
   });
 
+// ---------- Image generation with layered fallback ----------
+
 const IllustrationInput = z.object({ prompt: z.string().min(2) });
+
+function buildStyledPrompt(prompt: string) {
+  return `Minimal flat vector illustration, educational, professional, clean white background, muted green (#0F7A3A) and red (#C8102E) accent palette, no text, no letters, no logos, no watermarks. Subject: ${prompt}`;
+}
+
+async function tryGeminiImage(styled: string, model: string): Promise<{ dataUrl: string } | null> {
+  try {
+    const res = await callGemini(
+      model,
+      {
+        contents: [{ role: "user", parts: [{ text: styled }] }],
+        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+      },
+      { retries: 2, timeoutMs: 30_000 }
+    );
+    const json = (await res.json()) as {
+      candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[];
+    };
+    const parts = json.candidates?.[0]?.content?.parts ?? [];
+    const imagePart = parts.find((p) => p.inlineData?.data);
+    if (!imagePart?.inlineData?.data) return null;
+    const mimeType = imagePart.inlineData.mimeType || "image/png";
+    return { dataUrl: `data:${mimeType};base64,${imagePart.inlineData.data}` };
+  } catch (err) {
+    console.error(`Gemini image model ${model} failed:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function tryPollinationsImage(prompt: string): Promise<{ dataUrl: string } | null> {
+  try {
+    const seed = Math.floor(Math.random() * 1_000_000);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=800&height=800&seed=${seed}&nologo=true`;
+    const res = await fetchWithTimeout(url, {}, 20_000);
+    if (!res.ok) return null;
+    const arrayBuffer = await res.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString("base64");
+    return { dataUrl: `data:image/jpeg;base64,${base64}` };
+  } catch (err) {
+    console.error("Pollinations fallback failed:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
 
 export const generateIllustration = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => IllustrationInput.parse(data))
   .handler(async ({ data }) => {
-    const styled = `Minimal flat vector illustration, ${data.prompt}`;
-    
-    let retries = 3;
-    while (retries > 0) {
-      const seed = Math.floor(Math.random() * 1_000_000);
-      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(styled)}?width=800&height=800&seed=${seed}&nologo=true`;
-      const res = await fetch(url);
-      
-      if (res.status === 429) {
-        await new Promise(r => setTimeout(r, 2000));
-        retries--;
-        continue;
-      }
-      
-      if (!res.ok) throw new Error("Image generation failed.");
-      
-      const arrayBuffer = await res.arrayBuffer();
-      const base64 = Buffer.from(arrayBuffer).toString("base64");
-      return { dataUrl: `data:image/jpeg;base64,${base64}` };
+    const styled = buildStyledPrompt(data.prompt);
+
+    // Try each Gemini image model in order, then fall back to an
+    // unauthenticated third-party generator so a Gemini image outage or
+    // missing billing doesn't take down illustrations for the whole deck.
+    for (const model of IMAGE_MODELS) {
+      const result = await tryGeminiImage(styled, model);
+      if (result) return result;
     }
-    throw new Error("Rate limit exceeded for image generation.");
+    const fallback = await tryPollinationsImage(styled);
+    if (fallback) return fallback;
+
+    throw new Error("Image generation failed on all providers. The slide will use a placeholder.");
   });
