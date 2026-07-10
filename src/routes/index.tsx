@@ -45,6 +45,31 @@ function StudioPageInner() {
   const [phase, setPhase] = useState<"idle" | "outline" | "done">("idle");
   const [downloading, setDownloading] = useState(false);
 
+  // Live rate-limit countdown. When Gemini's free tier (10 req/min, 250/day)
+  // returns a 429, the server tells us exactly how many seconds to wait via
+  // a "RATE_LIMITED::<seconds>::message" error string. We count that down
+  // visibly instead of silently retrying, so it's always obvious what's
+  // happening and the button re-enables itself the moment it hits zero.
+  const [cooldown, setCooldown] = useState<{ secondsLeft: number; total: number } | null>(null);
+
+  useEffect(() => {
+    if (!cooldown) return;
+    if (cooldown.secondsLeft <= 0) {
+      setCooldown(null);
+      return;
+    }
+    const id = setTimeout(() => {
+      setCooldown((c) => (c ? { ...c, secondsLeft: c.secondsLeft - 1 } : c));
+    }, 1000);
+    return () => clearTimeout(id);
+  }, [cooldown]);
+
+  function formatCooldown(s: number) {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  }
+
   // The key never touches a server other than Google's — it's kept in the
   // browser only, so returning users don't have to paste it every time.
   // (Wrapped in try/catch: some browsers throw on localStorage access in
@@ -112,7 +137,17 @@ function StudioPageInner() {
       toast.success(`Deck ready — ${d.slides.length} slides`);
     } catch (e) {
       console.error(e);
-      toast.error(e instanceof Error ? e.message : "Generation failed");
+      const message = e instanceof Error ? e.message : "Generation failed";
+      const rateLimitMatch = /^RATE_LIMITED::(\d+)::(.*)$/s.exec(message);
+      if (rateLimitMatch) {
+        const seconds = parseInt(rateLimitMatch[1], 10);
+        setCooldown({ secondsLeft: seconds, total: seconds });
+        toast.error(
+          `Rate limited — wait ${formatCooldown(seconds)} (shown on the button)`,
+        );
+      } else {
+        toast.error(message);
+      }
       setPhase("idle");
     }
   }
@@ -185,7 +220,7 @@ function StudioPageInner() {
             </Field>
             <p className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
               Free at{" "}
-              <a
+              
                 href="https://aistudio.google.com/apikey"
                 target="_blank"
                 rel="noreferrer"
@@ -338,19 +373,43 @@ function StudioPageInner() {
 
           <button
             onClick={handleGenerate}
-            disabled={phase === "outline" || !apiKey.trim()}
+            disabled={phase === "outline" || !apiKey.trim() || !!cooldown}
             className="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60 transition"
           >
             {phase === "outline" ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" /> Building deck…
               </>
+            ) : cooldown ? (
+              <>Wait {formatCooldown(cooldown.secondsLeft)}</>
             ) : (
               <>
                 <Sparkles className="h-4 w-4" /> Generate slide deck
               </>
             )}
           </button>
+
+          {cooldown && (
+            <div className="mt-2 space-y-1.5 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <div className="flex items-center justify-between text-xs text-amber-900">
+                <span>Free-tier rate limit (10 req/min, 250/day)</span>
+                <span className="font-mono font-semibold">
+                  {formatCooldown(cooldown.secondsLeft)}
+                </span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-amber-200">
+                <div
+                  className="h-full rounded-full bg-amber-500 transition-all duration-1000 ease-linear"
+                  style={{
+                    width: `${(cooldown.secondsLeft / cooldown.total) * 100}%`,
+                  }}
+                />
+              </div>
+              <p className="text-[11px] text-amber-700">
+                The button unlocks itself automatically — no need to keep checking.
+              </p>
+            </div>
+          )}
 
           {deck && (
             <button
@@ -474,7 +533,7 @@ function ErrorBoundary({ children }: { children: ReactNode }) {
   return <ErrorBoundaryClass>{children}</ErrorBoundaryClass>;
 }
 
-class ErrorBoundaryClass extends Component<
+class ErrorBoundaryClass extends Component
   { children: ReactNode },
   { error: Error | null }
 > {
