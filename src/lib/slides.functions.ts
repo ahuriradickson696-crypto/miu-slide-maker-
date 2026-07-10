@@ -8,9 +8,9 @@ import { z } from "zod";
 // - Uses x-goog-api-key header (works with new "AQ." auth keys AND old "AIza" keys)
 // - ONE Gemini call per deck instead of two (analysis + generation merged) —
 //   this halves your request count against the free-tier rate limit
-// - On 429 it WAITS and retries the SAME model, instead of instantly hopping
-//   to another model. Rate limits are per API key/project, not per model, so
-//   hopping models on a 429 was guaranteed to fail every single time.
+// - On 429 it fails FAST with the exact wait time Google gives us, instead
+//   of silently sleeping server-side or hopping models (rate limits are
+//   per API key/project, not per model, so hopping models never helped)
 
 const MAX_PASTE_CHARS = 12000;
 
@@ -248,10 +248,6 @@ class GeminiError extends Error {
 
 const REQUEST_TIMEOUT_MS = 45_000;
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function callGeminiModel(
   apiKey: string,
   prompt: string,
@@ -287,8 +283,9 @@ async function callGeminiModel(
 
     if (!res.ok) {
       let errorDetail = "";
+      let errorJson: any = null;
       try {
-        const errorJson = await res.json();
+        errorJson = await res.json();
         errorDetail = errorJson?.error?.message || JSON.stringify(errorJson);
       } catch {
         errorDetail = await res.text().catch(() => "");
@@ -298,11 +295,29 @@ async function callGeminiModel(
         throw new GeminiError(`Model "${modelName}" not found.`, "MODEL_NOT_FOUND", 404);
       }
       if (res.status === 429) {
-        throw new GeminiError(
-          "Rate limited by Gemini's free tier (10 requests/minute, 250/day).",
+        // Google sometimes includes a RetryInfo detail with the exact wait time.
+        // Fall back to the Retry-After header, then a sane default.
+        let retryAfterSeconds = 60;
+        const retryInfo = errorJson?.error?.details?.find(
+          (d: any) => d?.["@type"]?.includes("RetryInfo"),
+        );
+        const retryDelayStr: string | undefined = retryInfo?.retryDelay; // e.g. "34s"
+        if (retryDelayStr) {
+          const match = /^(\d+(?:\.\d+)?)s$/.exec(retryDelayStr);
+          if (match) retryAfterSeconds = Math.ceil(parseFloat(match[1]));
+        } else {
+          const headerVal = res.headers.get("retry-after");
+          if (headerVal && !isNaN(Number(headerVal))) {
+            retryAfterSeconds = Number(headerVal);
+          }
+        }
+        const err = new GeminiError(
+          `Rate limited by Gemini's free tier (10 requests/minute, 250/day). Retry after ${retryAfterSeconds}s.`,
           "RATE_LIMITED",
           429,
         );
+        (err as any).retryAfterSeconds = retryAfterSeconds;
+        throw err;
       }
       if (res.status === 401 || res.status === 403) {
         throw new GeminiError(
@@ -357,12 +372,11 @@ async function callGeminiModel(
 }
 
 /**
- * Calls Gemini with sane retry logic:
- * - 404 (model gone) -> switch to the fallback model immediately, no point retrying.
- * - 429 (rate limited) -> this is per API-key/project, NOT per model, so switching
- *   models is pointless. We WAIT with real backoff and retry the SAME model.
- * - 500/502/503/504 -> short wait, retry same model, then fall back.
- * - 401/403 (bad key) -> fail immediately, retrying won't help.
+ * Calls Gemini with FAST FAILURE on rate limits — no blind internal sleeping.
+ * If the primary model is rate limited, try the fallback model ONCE
+ * (different model = separate consideration, worth one try). If both are
+ * rate limited, throw immediately with the exact wait time so the CLIENT
+ * can show a visible countdown instead of the server silently blocking.
  */
 async function callGeminiWithRetry(
   apiKey: string,
@@ -370,53 +384,43 @@ async function callGeminiWithRetry(
 ): Promise<Record<string, unknown>> {
   const models = [PRIMARY_MODEL, FALLBACK_MODEL];
   let lastError: GeminiError | Error | null = null;
+  let rateLimitRetryAfter: number | null = null;
 
   for (let modelIdx = 0; modelIdx < models.length; modelIdx++) {
     const model = models[modelIdx];
-    const isLastModel = modelIdx === models.length - 1;
 
-    // Up to 3 attempts per model, with real backoff on rate limits.
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        return await callGeminiModel(apiKey, prompt, model);
-      } catch (err) {
-        lastError = err as Error;
-        const code = err instanceof GeminiError ? err.code : "UNKNOWN";
+    try {
+      return await callGeminiModel(apiKey, prompt, model);
+    } catch (err) {
+      lastError = err as Error;
+      const code = err instanceof GeminiError ? err.code : "UNKNOWN";
 
-        if (code === "AUTH") throw err; // no point retrying a bad key
+      if (code === "AUTH") throw err; // no point retrying a bad key
 
-        if (code === "MODEL_NOT_FOUND") break; // go to next model, don't retry this one
-
-        if (code === "RATE_LIMITED") {
-          if (attempt === 3) break; // give up on this model, try fallback
-          const waitMs = 8000 * attempt; // 8s, 16s
-          console.log(`Rate limited on ${model}, waiting ${waitMs / 1000}s before retry ${attempt + 1}/3...`);
-          await sleep(waitMs);
-          continue;
+      if (code === "RATE_LIMITED") {
+        const retryAfter = (err as any).retryAfterSeconds;
+        if (retryAfter && (rateLimitRetryAfter === null || retryAfter > rateLimitRetryAfter)) {
+          rateLimitRetryAfter = retryAfter;
         }
-
-        if (code === "SERVER_ERROR" || code === "TIMEOUT" || code === "EMPTY_RESPONSE") {
-          if (attempt === 3) break;
-          await sleep(2000 * attempt);
-          continue;
-        }
-
-        // PARSE_ERROR / BAD_REQUEST — retrying the exact same prompt won't help much,
-        // but try once more in case it was a fluke, then move on.
-        if (attempt === 3) break;
-        await sleep(1000);
+        continue; // try next model once, don't sleep
       }
-    }
 
-    if (!isLastModel) {
-      console.log(`Falling back to ${models[modelIdx + 1]}...`);
+      continue; // 404 / server error / timeout / bad json — try next model once
     }
   }
 
+  if (rateLimitRetryAfter !== null) {
+    const err = new GeminiError(
+      `RATE_LIMITED::${rateLimitRetryAfter}::You've hit Gemini's free-tier limit (10 requests/minute, 250/day).`,
+      "RATE_LIMITED",
+      429,
+    );
+    (err as any).retryAfterSeconds = rateLimitRetryAfter;
+    throw err;
+  }
+
   const hint =
-    lastError instanceof GeminiError && lastError.code === "RATE_LIMITED"
-      ? "\n\nYou've hit Gemini's free-tier limit (10 requests/minute, 250/day). Wait about a minute and try again — avoid clicking generate multiple times in a row."
-      : "\n\nTroubleshooting:\n1. Get a fresh key: https://aistudio.google.com/apikey\n2. Make sure the key isn't restricted to the wrong API\n3. Check your region isn't blocked by Google";
+    "\n\nTroubleshooting:\n1. Get a fresh key: https://aistudio.google.com/apikey\n2. Make sure the key isn't restricted to the wrong API\n3. Check your region isn't blocked by Google";
 
   throw new GeminiError(
     `Slide generation failed. ${lastError instanceof Error ? lastError.message : "Unknown error"}${hint}`,
@@ -492,6 +496,15 @@ export const generateDeck = createServerFn({ method: "POST" })
       const parsed = await callGeminiWithRetry(data.apiKey.trim(), prompt);
       return toSlideDeck(data, parsed);
     } catch (err) {
+      // Encode retryAfterSeconds into the message itself since thrown Error
+      // objects only reliably carry `message` across the server->client boundary.
+      // Client parses the "RATE_LIMITED::<seconds>::" prefix to drive the timer.
+      if (err instanceof GeminiError && err.code === "RATE_LIMITED") {
+        const retryAfter = (err as any).retryAfterSeconds ?? 60;
+        throw new Error(
+          `RATE_LIMITED::${retryAfter}::You've hit Gemini's free-tier limit (10 requests/minute, 250/day). Wait ${retryAfter}s and try again.`,
+        );
+      }
       throw new Error(
         err instanceof Error && err.message
           ? err.message
