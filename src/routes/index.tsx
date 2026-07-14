@@ -8,10 +8,29 @@ import {
   FileText,
   Wand2,
   KeyRound,
+  History,
+  Trash2,
+  X,
 } from "lucide-react";
 import { generateDeck, type SlideDeck } from "@/lib/slides.functions";
 import { exportDeckToPptx } from "@/lib/pptx-export";
+import {
+  saveDeck,
+  listDecks,
+  getDeck,
+  deleteDeck,
+} from "@/lib/deck-storage.functions";
 import logo from "@/assets/miu-logo.jpg";
+
+type HistoryItem = {
+  id: string;
+  topic: string;
+  courseName: string;
+  courseCode: string;
+  suggestedFilename: string;
+  slideCount: number;
+  createdAt: string;
+};
 
 export const Route = createFileRoute("/")({
   component: StudioPage,
@@ -51,6 +70,64 @@ function StudioPageInner() {
   // visibly instead of silently retrying, so it's always obvious what's
   // happening and the button re-enables itself the moment it hits zero.
   const [cooldown, setCooldown] = useState<{ secondsLeft: number; total: number } | null>(null);
+
+  // Saved-deck history, backed by Postgres via deck-storage.functions.
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [loadingDeckId, setLoadingDeckId] = useState<string | null>(null);
+  const [deletingDeckId, setDeletingDeckId] = useState<string | null>(null);
+
+  async function refreshHistory() {
+    setHistoryLoading(true);
+    try {
+      const rows = await listDecks();
+      setHistory(rows);
+    } catch (e) {
+      console.error(e);
+      toast.error("Couldn't load deck history");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  function toggleHistory() {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) refreshHistory();
+  }
+
+  async function handleLoadDeck(id: string) {
+    setLoadingDeckId(id);
+    try {
+      const d = await getDeck({ data: { id } });
+      setDeck(d);
+      setPhase("done");
+      setHistoryOpen(false);
+      toast.success("Deck loaded");
+    } catch (e) {
+      console.error(e);
+      toast.error(
+        e instanceof Error ? e.message : "Couldn't load that deck",
+      );
+    } finally {
+      setLoadingDeckId(null);
+    }
+  }
+
+  async function handleDeleteDeck(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    setDeletingDeckId(id);
+    try {
+      await deleteDeck({ data: { id } });
+      setHistory((h) => h.filter((item) => item.id !== id));
+    } catch (e) {
+      console.error(e);
+      toast.error("Couldn't delete that deck");
+    } finally {
+      setDeletingDeckId(null);
+    }
+  }
 
   useEffect(() => {
     if (!cooldown) return;
@@ -135,6 +212,27 @@ function StudioPageInner() {
       setDeck(d);
       setPhase("done");
       toast.success(`Deck ready — ${d.slides.length} slides`);
+
+      // Persist to Postgres so it shows up in History. Best-effort: a save
+      // failure (e.g. DATABASE_URL not configured yet) shouldn't block the
+      // user from seeing/downloading the deck they just generated.
+      try {
+        await saveDeck({
+          data: {
+            courseName: d.courseName,
+            courseCode: d.courseCode,
+            courseLevel: d.courseLevel,
+            creditUnits: d.creditUnits,
+            contactTime: d.contactTime,
+            topic: d.topic,
+            suggestedFilename: d.suggestedFilename ?? "",
+            slides: d.slides,
+          },
+        });
+        if (historyOpen) refreshHistory();
+      } catch (saveErr) {
+        console.error("Deck save failed:", saveErr);
+      }
     } catch (e) {
       console.error(e);
       const message = e instanceof Error ? e.message : "Generation failed";
@@ -192,8 +290,88 @@ function StudioPageInner() {
             <Sparkles className="h-3.5 w-3.5" />
             Powered by Gemini • Free tier
           </div>
+          <button
+            type="button"
+            onClick={toggleHistory}
+            className="flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1.5 text-xs font-medium hover:bg-white/25 transition"
+          >
+            <History className="h-3.5 w-3.5" />
+            History
+          </button>
         </div>
       </header>
+
+      {historyOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setHistoryOpen(false)}
+          />
+          <div className="relative h-full w-full max-w-sm bg-background border-l shadow-xl flex flex-col">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="font-semibold text-sm">Saved decks</h3>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(false)}
+                className="rounded-md p-1 hover:bg-muted transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {historyLoading ? (
+                <div className="flex items-center justify-center py-10 text-muted-foreground">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                </div>
+              ) : history.length === 0 ? (
+                <p className="px-2 py-10 text-center text-sm text-muted-foreground">
+                  No saved decks yet — generate one and it'll show up here.
+                </p>
+              ) : (
+                history.map((item) => (
+                  <div
+                    key={item.id}
+                    onClick={() => handleLoadDeck(item.id)}
+                    className="cursor-pointer rounded-lg border p-3 hover:border-primary transition flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">
+                        {item.topic || item.suggestedFilename || "Untitled deck"}
+                      </p>
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {[item.courseCode, item.courseName]
+                          .filter(Boolean)
+                          .join(" • ") || "—"}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {item.slideCount} slides •{" "}
+                        {new Date(item.createdAt).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1 pt-0.5">
+                      {loadingDeckId === item.id && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteDeck(item.id, e)}
+                        disabled={deletingDeckId === item.id}
+                        className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition disabled:opacity-50"
+                      >
+                        {deletingDeckId === item.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-7xl px-6 py-8 grid gap-8 lg:grid-cols-[380px_1fr]">
         {/* Form */}
@@ -220,7 +398,7 @@ function StudioPageInner() {
             </Field>
             <p className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
               Free at{" "}
-              
+              <a
                 href="https://aistudio.google.com/apikey"
                 target="_blank"
                 rel="noreferrer"
@@ -533,7 +711,7 @@ function ErrorBoundary({ children }: { children: ReactNode }) {
   return <ErrorBoundaryClass>{children}</ErrorBoundaryClass>;
 }
 
-class ErrorBoundaryClass extends Component
+class ErrorBoundaryClass extends Component<
   { children: ReactNode },
   { error: Error | null }
 > {

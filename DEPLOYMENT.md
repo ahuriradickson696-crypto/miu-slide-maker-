@@ -26,12 +26,22 @@ gh repo create your-repo-name --private --source=. --push
    | Key | Value | Environments |
    |---|---|---|
    | `GEMINI_API_KEY` | *your key from step 1* | Production, Preview, Development |
+   | `DATABASE_URL` | *your Neon Postgres connection string, see below* | Production, Preview, Development |
 4. Click **Deploy**
+
+## 3b. Set up the Neon database (deck history)
+
+Saved decks (the History panel) are stored in Postgres via [Neon](https://neon.tech). This is optional — if `DATABASE_URL` isn't set, deck generation and download still work, decks just won't be saved.
+
+1. Go to https://neon.tech and create a free project (or, easier: in Vercel, **Storage → Create Database → Neon Postgres**, which sets `DATABASE_URL` for you automatically)
+2. If you created the Neon project outside Vercel, copy the connection string from the Neon dashboard (starts with `postgres://...`) and paste it as `DATABASE_URL` in step 3 above
+3. No manual migration needed — the app creates its own `decks` and `slides` tables automatically the first time it runs (see `src/lib/db.ts`)
 
 ## 4. Verify
 - Open the deployed URL
 - Try generating a deck — this calls `generateDeck` (text) and `generateIllustration` (images), both of which read `process.env.GEMINI_API_KEY` **server-side only** (it's never sent to the browser)
 - If you see "Missing GEMINI_API_KEY", double check the env var is set for the right environment and redeploy
+- Click **History** in the header — the deck you just generated should appear there. If it's empty and the deck generated fine, double-check `DATABASE_URL` is set
 
 ## Local development
 ```bash

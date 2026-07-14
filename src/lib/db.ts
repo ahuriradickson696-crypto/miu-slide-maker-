@@ -21,10 +21,10 @@ function getConnectionString(): string {
 
 // Lazily created so the app doesn't crash at import time if the env var
 // isn't set yet (e.g. during local `vite build` without a .env).
-let sqlClient: ReturnType<typeof neon> | null = null;
+let sqlClient: ReturnType<typeof neon<false, false>> | null = null;
 
 export function sql() {
-  if (!sqlClient) sqlClient = neon(getConnectionString());
+  if (!sqlClient) sqlClient = neon<false, false>(getConnectionString());
   return sqlClient;
 }
 
