@@ -48,13 +48,37 @@
   --destructive-foreground: oklch(0.99 0.005 120);
 }
 
+.dark {
+  --background: oklch(0.19 0.015 150);
+  --foreground: oklch(0.95 0.01 120);
+  --card: oklch(0.24 0.018 150);
+  --card-foreground: oklch(0.95 0.01 120);
+  /* MIU green, brightened for dark surfaces */
+  --primary: oklch(0.62 0.15 148);
+  --primary-foreground: oklch(0.15 0.02 150);
+  /* MIU red, brightened for dark surfaces */
+  --accent: oklch(0.64 0.2 27);
+  --accent-foreground: oklch(0.15 0.02 150);
+  --muted: oklch(0.28 0.015 150);
+  --muted-foreground: oklch(0.68 0.02 140);
+  --border: oklch(0.32 0.02 150);
+  --input: oklch(0.3 0.02 150);
+  --ring: oklch(0.62 0.15 148);
+  --destructive: oklch(0.64 0.2 27);
+  --destructive-foreground: oklch(0.15 0.02 150);
+}
+
 @layer base {
   * { border-color: var(--color-border); }
+  html {
+    transition: background-color 0.2s ease;
+  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     overflow-x: hidden;
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
   /* iOS Safari auto-zooms into any input/textarea with font-size below 16px on focus.
      Force 16px on phones so tapping a field doesn't jump-zoom the whole page. */
@@ -64,6 +88,11 @@
     }
   }
 }
+
+/* Personalization: font-size preference, scales all rem-based text */
+html[data-font-scale="sm"] { font-size: 14px; }
+html[data-font-scale="md"] { font-size: 16px; }
+html[data-font-scale="lg"] { font-size: 18px; }
 
 @utility miu-gradient {
   background-image: linear-gradient(135deg, oklch(0.48 0.14 148) 0%, oklch(0.38 0.12 148) 100%);

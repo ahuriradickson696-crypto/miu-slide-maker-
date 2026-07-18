@@ -85,6 +85,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: "MIU Slide Studio — AI Lecture Deck Generator" },
       { name: "twitter:description", content: "Generate branded Metropolitan International University lecture slide decks with AI illustrations, downloadable as PowerPoint." },
+      { name: "theme-color", content: "#0F7A3A" },
     ],
     links: [
       {
@@ -92,6 +93,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: appCss,
       },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+      { rel: "manifest", href: "/manifest.webmanifest" },
     ],
   }),
   shellComponent: RootShell,

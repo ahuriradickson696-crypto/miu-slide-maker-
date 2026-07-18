@@ -1,0 +1,22 @@
+{
+  "name": "MIU Slide Studio",
+  "short_name": "MIU Studio",
+  "description": "Generate branded Metropolitan International University lecture slide decks with AI, downloadable as PowerPoint.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F8F5",
+  "theme_color": "#0F7A3A",
+  "icons": [
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
