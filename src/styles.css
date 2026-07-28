@@ -101,3 +101,76 @@ html[data-font-scale="lg"] { font-size: 18px; }
 @utility slide-shadow {
   box-shadow: 0 20px 60px -20px rgba(15, 122, 58, 0.35);
 }
+
+/* ===== Printing ===== */
+/* Printing a deck should produce one slide per landscape page, with no app
+   chrome (header, form panel, drawers, buttons, drag handles) — just the
+   slide visuals themselves, which is what someone handing this out in a
+   lecture or filing as a handout actually wants. */
+@media print {
+  @page {
+    size: landscape;
+    margin: 0.3in;
+  }
+
+  /* Hide everything by default, then explicitly re-show whichever
+     printable region is on the page — the slide deck grid on the Slide
+     Studio page, or the lecture-notes document on its own page. Only one
+     of these two ever exists in the DOM at once, so combining them here
+     is safe. */
+  body * {
+    visibility: hidden;
+  }
+  #printable-deck,
+  #printable-deck *,
+  #lecture-notes-doc,
+  #lecture-notes-doc * {
+    visibility: visible;
+  }
+  #printable-deck,
+  #lecture-notes-doc {
+    position: absolute;
+    inset: 0;
+    display: block !important;
+    margin: 0;
+    padding: 0;
+  }
+  #lecture-notes-doc {
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  .print-hide {
+    display: none !important;
+  }
+
+  .print-slide {
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    break-after: page;
+    break-inside: avoid;
+    width: 100%;
+    height: 100vh;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+  .print-slide:last-child {
+    break-after: auto;
+  }
+
+  .print-slide-visual {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    max-height: 100vh;
+  }
+
+  /* Preserve slide background colors (title slides, theme accents) instead
+     of the browser stripping them to save ink by default. */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
