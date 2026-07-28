@@ -1,9 +1,25 @@
 # Deploying MIU Slide Studio to GitHub + Vercel
 
+## App structure
+This is a small suite of pages sharing one deployment and one database:
+
+| Route | What it is |
+|---|---|
+| `/` | Home — MIU-branded hub linking to each module |
+| `/slides` | Slide Studio — the AI slide-deck generator (this used to live at `/`) |
+| `/notes` | Lecture Notes library — every lecture-notes document you've generated |
+| `/lecture-notes/:deckId` | A single lecture-notes document, generated from a specific deck |
+| `/admin` | Admin control center — usage stats, user management, moderation, system/API status |
+| `/reset-password` | Destination for emailed password-reset links |
+
+Each module has its own dedicated database table(s) (`decks`/`slides` for Slide Studio, `lecture_notes` for Lecture Notes) rather than sharing a generic table — as more modules are added later (quizzes, flashcards, etc.), each gets its own table too.
+
 ## 1. Get a Gemini API key
 1. Go to https://aistudio.google.com/apikey
 2. Sign in and click **Create API Key** (free tier, no card needed)
 3. Copy the key — you'll paste it into Vercel, not into any file
+
+By default, each person pastes their own key into the app (stored only in their browser). If you'd rather offer the tool without requiring that, set `GEMINI_API_KEY` as a Vercel environment variable (Production/Preview/Development) — the app falls back to this shared key automatically whenever someone hasn't pasted their own. Their own key, if entered, always takes priority (so it counts against their personal quota, not the shared one). The admin panel's System tab shows whether a shared key is configured, without ever displaying its value.
 
 ⚠️ **Never commit your real key to Git.** `.env` is already in `.gitignore`.
 
@@ -67,3 +83,77 @@ If you already deployed before this fix, or still see a 404 after redeploying:
 - The key is read via `process.env.GEMINI_API_KEY` inside server functions (`src/lib/slides.functions.ts`), which only run on the server — it's never bundled into client-side JS.
 - `.gitignore` excludes `.env`, `.env.local`, and `.vercel` so secrets can't be committed by accident.
 - If a key is ever exposed (e.g. pasted in chat, committed by mistake, shared in a screenshot), revoke it immediately at https://aistudio.google.com/apikey and generate a new one.
+
+## 5. Optional: accounts (Google Sign-In + email/password, personal history)
+
+Without this, the app works exactly as before — anyone can generate and download decks, but History is empty for everyone (decks aren't tied to an account). Setting this up enables both Google Sign-In and a standard email/password sign-in (with forgot/reset password), makes History and the Lecture Notes library personal per account, and unlocks `/admin` — a full control center with usage stats, user management (promote/revoke admins), and moderation tools for any deck or lecture-notes document.
+
+Both sign-in methods share the same account — signing in with Google using the same email as an existing password account (or vice versa) links to the same user rather than creating a duplicate.
+
+### 5a. Core accounts setup (required for either sign-in method)
+| Key | Value | Notes |
+|---|---|---|
+| `SESSION_SECRET` | *random string, 32+ chars* | Generate with `openssl rand -base64 32`. Signs the session cookie — keep it secret, and don't change it once real users are signed in (it'll log everyone out) |
+| `DATABASE_URL` | *see §4 above* | Required for any accounts — user rows, password hashes, and reset tokens live in Postgres |
+| `ADMIN_EMAILS` | *comma-separated emails* | Optional. Additional emails to also bootstrap as admins, besides the app's built-in first admin (see below). After first login, admin status lives in the `users.is_admin` column and can be granted/revoked from the Users tab in `/admin` itself, without editing this env var or redeploying |
+
+**A working first admin exists out of the box** — `ahuriratech@gmail.com` is the app's designated first admin. The first time that account signs in (Google or email/password), it's automatically promoted, and from there it can promote or revoke anyone else via the Users tab. `ADMIN_EMAILS` above is only needed if you want other accounts to *also* bootstrap in automatically, rather than being promoted manually afterward.
+
+The session cookie is `httpOnly` and `sameSite: lax` always, and `secure` (HTTPS-only) whenever `NODE_ENV=production` (Vercel sets this automatically).
+
+### 5b. Google Sign-In (optional, on top of 5a)
+1. Go to https://console.cloud.google.com/apis/credentials (create a project first if you don't have one)
+2. **Create Credentials → OAuth client ID → Web application**
+3. Under **Authorized JavaScript origins**, add your site's origin(s), e.g. `https://your-app.vercel.app` (and `http://localhost:3000` for local dev). You do **not** need to set an Authorized redirect URI — sign-in uses Google Identity Services' token flow, which only checks the origin.
+4. Copy the generated **Client ID** (looks like `1234567890-abc...apps.googleusercontent.com`) — you won't need the client secret for this flow.
+
+| Key | Value | Notes |
+|---|---|---|
+| `VITE_GOOGLE_CLIENT_ID` | *the Client ID above* | Exposed to the browser (client IDs aren't secret) — required for the Sign-In button to render at all |
+| `GOOGLE_CLIENT_ID` | *same Client ID* | Server-side copy, used to verify sign-in tokens actually came from your app |
+| `GOOGLE_HOSTED_DOMAIN` | *e.g. `miu.ac.ug`* | Optional. If set, only Google Workspace accounts on that domain can sign in — personal Gmail accounts are rejected |
+
+Google ID tokens are verified server-side via local JWT signature verification against Google's published JWKS (`https://www.googleapis.com/oauth2/v3/certs`) — Google's documented production method, not the rate-limited `/tokeninfo` debug endpoint. If `VITE_GOOGLE_CLIENT_ID` isn't set, the Google button simply doesn't render — nothing breaks.
+
+### 5c. Email/password sign-in (optional, on top of 5a — works even without 5b)
+Enabled automatically once `SESSION_SECRET` and `DATABASE_URL` are set — no extra env vars required for basic sign-up/sign-in. Passwords are hashed with scrypt (never stored in plaintext), sign-in/signup/reset are all rate-limited per email+IP, and error messages are intentionally generic (never reveal whether an email is registered).
+
+**Forgot/reset password** works out of the box too, but without an email provider configured, the reset link is only logged to the server console (visible to you, not the user) instead of actually emailed. To make it deliver real emails:
+
+| Key | Value | Notes |
+|---|---|---|
+| `RESEND_API_KEY` | *from https://resend.com* | Free tier available. Without this, reset links are logged server-side instead of sent |
+| `RESEND_FROM_EMAIL` | *e.g. `MIU Slide Studio <noreply@yourdomain.com>`* | Optional — defaults to Resend's shared `onboarding@resend.dev` sender, which works for testing but you'll want your own verified domain for production |
+| `APP_URL` | *e.g. `https://your-app.vercel.app`* | Required for reset links to point at the right domain — without it, emailed links will be relative and won't work from an email client |
+
+### 5d. Verify
+- Open the deployed URL — a "Sign in" button should appear in the header, opening a panel with email/password fields plus a Google button (if 5b is configured)
+- Create an account with email/password, then sign out and back in
+- Click "Forgot password?", submit an email, and check either your inbox (if `RESEND_API_KEY` is set) or the server logs (if not) for the reset link
+- History (the drawer) should now show only decks generated while signed in as you
+- Sign in as `ahuriratech@gmail.com` (or an email listed in `ADMIN_EMAILS`, if set) and visit `/admin` to see the control center
+
+## 6. Optional: Upstash Redis (distributed rate limiting, caching, locking)
+
+Without this, the app still works exactly as before — it just falls back to per-instance, best-effort versions of three things:
+- **Rate limiting**: instead of proactively blocking a request once your key has hit 10/min or 250/day *across every server instance*, it only catches the limit reactively when Gemini itself returns a 429 — so on a busy serverless deployment (multiple warm instances), it's possible to slightly overshoot before the limit is caught.
+- **Generation cache**: falls back to the existing Postgres-backed `generation_cache` table instead of Redis (works fine, just slower and needs `DATABASE_URL` set).
+- **Per-key call locking**: falls back to an in-memory lock that only protects against races within one warm instance, not across instances.
+
+Set these two environment variables in Vercel to upgrade all three to real, cross-instance behavior via [Upstash Redis](https://upstash.com) (they have a free tier):
+
+| Key | Value | Environments |
+|---|---|---|
+| `UPSTASH_REDIS_REST_URL` | *your Upstash database's REST URL* | Production, Preview, Development |
+| `UPSTASH_REDIS_REST_TOKEN` | *your Upstash database's REST token* | Production, Preview, Development |
+
+Get both from the Upstash console → your database → **REST API** tab (use the `.env` snippet it gives you). No code changes needed — `src/lib/redis.ts` reads them lazily and every call site checks whether Redis is configured before using it, so this is purely additive.
+
+⚠️ Treat the REST token like any other secret — don't commit it to Git or paste it somewhere public. If it's ever exposed, regenerate it from the Upstash console.
+
+## 7. Running tests
+```bash
+npm test
+```
+Runs the small `vitest` unit test suite (`src/lib/*.test.ts`) covering slide-content clamping, deck themes, and the i18n dictionary. This isn't full coverage — it's a starting point, not a guarantee.
+
