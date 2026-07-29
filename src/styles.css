@@ -48,37 +48,13 @@
   --destructive-foreground: oklch(0.99 0.005 120);
 }
 
-.dark {
-  --background: oklch(0.19 0.015 150);
-  --foreground: oklch(0.95 0.01 120);
-  --card: oklch(0.24 0.018 150);
-  --card-foreground: oklch(0.95 0.01 120);
-  /* MIU green, brightened for dark surfaces */
-  --primary: oklch(0.62 0.15 148);
-  --primary-foreground: oklch(0.15 0.02 150);
-  /* MIU red, brightened for dark surfaces */
-  --accent: oklch(0.64 0.2 27);
-  --accent-foreground: oklch(0.15 0.02 150);
-  --muted: oklch(0.28 0.015 150);
-  --muted-foreground: oklch(0.68 0.02 140);
-  --border: oklch(0.32 0.02 150);
-  --input: oklch(0.3 0.02 150);
-  --ring: oklch(0.62 0.15 148);
-  --destructive: oklch(0.64 0.2 27);
-  --destructive-foreground: oklch(0.15 0.02 150);
-}
-
 @layer base {
   * { border-color: var(--color-border); }
-  html {
-    transition: background-color 0.2s ease;
-  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     overflow-x: hidden;
-    transition: background-color 0.2s ease, color 0.2s ease;
   }
   /* iOS Safari auto-zooms into any input/textarea with font-size below 16px on focus.
      Force 16px on phones so tapping a field doesn't jump-zoom the whole page. */
@@ -89,88 +65,10 @@
   }
 }
 
-/* Personalization: font-size preference, scales all rem-based text */
-html[data-font-scale="sm"] { font-size: 14px; }
-html[data-font-scale="md"] { font-size: 16px; }
-html[data-font-scale="lg"] { font-size: 18px; }
-
 @utility miu-gradient {
   background-image: linear-gradient(135deg, oklch(0.48 0.14 148) 0%, oklch(0.38 0.12 148) 100%);
 }
 
 @utility slide-shadow {
   box-shadow: 0 20px 60px -20px rgba(15, 122, 58, 0.35);
-}
-
-/* ===== Printing ===== */
-/* Printing a deck should produce one slide per landscape page, with no app
-   chrome (header, form panel, drawers, buttons, drag handles) — just the
-   slide visuals themselves, which is what someone handing this out in a
-   lecture or filing as a handout actually wants. */
-@media print {
-  @page {
-    size: landscape;
-    margin: 0.3in;
-  }
-
-  /* Hide everything by default, then explicitly re-show whichever
-     printable region is on the page — the slide deck grid on the Slide
-     Studio page, or the lecture-notes document on its own page. Only one
-     of these two ever exists in the DOM at once, so combining them here
-     is safe. */
-  body * {
-    visibility: hidden;
-  }
-  #printable-deck,
-  #printable-deck *,
-  #lecture-notes-doc,
-  #lecture-notes-doc * {
-    visibility: visible;
-  }
-  #printable-deck,
-  #lecture-notes-doc {
-    position: absolute;
-    inset: 0;
-    display: block !important;
-    margin: 0;
-    padding: 0;
-  }
-  #lecture-notes-doc {
-    border: none !important;
-    box-shadow: none !important;
-    border-radius: 0 !important;
-  }
-
-  .print-hide {
-    display: none !important;
-  }
-
-  .print-slide {
-    border: none !important;
-    box-shadow: none !important;
-    border-radius: 0 !important;
-    break-after: page;
-    break-inside: avoid;
-    width: 100%;
-    height: 100vh;
-    display: flex !important;
-    align-items: center;
-    justify-content: center;
-  }
-  .print-slide:last-child {
-    break-after: auto;
-  }
-
-  .print-slide-visual {
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    max-height: 100vh;
-  }
-
-  /* Preserve slide background colors (title slides, theme accents) instead
-     of the browser stripping them to save ink by default. */
-  * {
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
 }

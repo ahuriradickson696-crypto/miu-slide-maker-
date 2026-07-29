@@ -1,9 +1,12 @@
 import PptxGenJS from "pptxgenjs";
 import type { SlideDeck, SlideSpec } from "./slides.functions";
-import { getTheme, type ThemeId, type DeckTheme } from "./themes";
 import logoAsset from "@/assets/miu-logo.jpg";
 
+const GREEN = "0F7A3A";
+const RED = "C8102E";
 const WHITE = "FFFFFF";
+const DARK = "1F2937";
+const MUTED = "6B7280";
 
 // Slide is 5.63in tall; footer starts at 5.05, so all content must stay above this line.
 const CONTENT_BOTTOM = 4.95;
@@ -24,7 +27,13 @@ async function urlToBase64(url: string): Promise<string | null> {
   }
 }
 
-function addFooter(slide: PptxGenJS.Slide, logo: string | null, theme: DeckTheme) {
+function addNotes(slide: PptxGenJS.Slide, spec: SlideSpec) {
+  if (spec.speakerNotes && spec.speakerNotes.trim()) {
+    slide.addNotes(spec.speakerNotes.trim());
+  }
+}
+
+function addFooter(slide: PptxGenJS.Slide, logo: string | null) {
   if (logo) {
     slide.addImage({ data: logo, x: 0.35, y: 5.05, w: 0.45, h: 0.45 });
   }
@@ -35,7 +44,7 @@ function addFooter(slide: PptxGenJS.Slide, logo: string | null, theme: DeckTheme
     h: 0.22,
     fontSize: 10,
     bold: true,
-    color: theme.primary,
+    color: GREEN,
     fontFace: "Calibri",
   });
   slide.addText("www.miu.ac.ug  |  info@miu.ac.ug  |  +256 772 561 957  |  Kampala • Mbarara • Kisoro Campuses", {
@@ -44,13 +53,13 @@ function addFooter(slide: PptxGenJS.Slide, logo: string | null, theme: DeckTheme
     w: 8.5,
     h: 0.22,
     fontSize: 9,
-    color: theme.muted,
+    color: MUTED,
     fontFace: "Calibri",
   });
 }
 
-function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, logo: string | null, theme: DeckTheme) {
-  slide.background = { color: theme.primary };
+function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, logo: string | null) {
+  slide.background = { color: GREEN };
   if (logo) {
     slide.addImage({ data: logo, x: 4.35, y: 0.4, w: 1.3, h: 1.3, rounding: true });
   }
@@ -70,7 +79,7 @@ function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, l
     const startX = (10 - total) / 2;
     slide.addShape("roundRect", {
       x: startX + i * (w + gap), y: 3.4, w, h: 0.55,
-      fill: { color: theme.accent }, line: { color: theme.accent }, rectRadius: 0.1,
+      fill: { color: RED }, line: { color: RED }, rectRadius: 0.1,
     });
     slide.addText(p, {
       x: startX + i * (w + gap), y: 3.4, w, h: 0.55,
@@ -79,10 +88,10 @@ function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, l
   });
 }
 
-function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string | null, theme: DeckTheme) {
+function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText("COURSE IDENTIFICATION DETAILS", {
-    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: theme.primary, fontFace: "Calibri", fit: "shrink",
+    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
   });
   const rows = [
     ["Course Name:", deck.courseName || "—"],
@@ -93,25 +102,24 @@ function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: str
   ];
   rows.forEach(([k, v], i) => {
     const y = 1.15 + i * 0.6;
-    slide.addShape("ellipse", { x: 0.7, y: y + 0.05, w: 0.35, h: 0.35, fill: { color: theme.primary }, line: { color: theme.primary } });
+    slide.addShape("ellipse", { x: 0.7, y: y + 0.05, w: 0.35, h: 0.35, fill: { color: GREEN }, line: { color: GREEN } });
     slide.addText([
-      { text: k + " ", options: { bold: true, color: theme.accent } },
-      { text: v, options: { color: theme.dark } },
+      { text: k + " ", options: { bold: true, color: RED } },
+      { text: v, options: { color: DARK } },
     ], { x: 1.25, y, w: 8.2, h: 0.45, fontSize: 15, fontFace: "Calibri", valign: "middle", fit: "shrink" });
   });
-  addFooter(slide, logo, theme);
+  addFooter(slide, logo);
 }
 
-function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null, compact: boolean, theme: DeckTheme) {
-  const scale = compact ? 0.88 : 1;
+function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
-    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: Math.round(24 * scale), bold: true, color: theme.primary, fontFace: "Calibri", fit: "shrink",
+    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 24, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
   });
   let y = 0.95;
   if (spec.subtitle) {
     slide.addText(spec.subtitle, {
-      x: 0.5, y, w: 9, h: 0.35, fontSize: Math.round(14 * scale), italic: true, color: theme.accent, fontFace: "Calibri", fit: "shrink",
+      x: 0.5, y, w: 9, h: 0.35, fontSize: 14, italic: true, color: RED, fontFace: "Calibri", fit: "shrink",
     });
     y += 0.4;
   }
@@ -125,7 +133,7 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | n
   const bodyH = spec.body ? Math.min(0.9, remainingH * 0.3) : 0;
   if (spec.body) {
     slide.addText(spec.body, {
-      x: 0.5, y, w: contentW, h: bodyH, fontSize: Math.round(13 * scale), color: theme.dark, fontFace: "Calibri", fit: "shrink",
+      x: 0.5, y, w: contentW, h: bodyH, fontSize: 13, color: DARK, fontFace: "Calibri", fit: "shrink",
     });
     y += bodyH + 0.1;
   }
@@ -137,10 +145,10 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | n
       const headH = Math.min(0.3, perSection * 0.4);
       const descH = Math.max(0.2, perSection - headH);
       slide.addText(s.heading, {
-        x: 0.5, y, w: contentW, h: headH, fontSize: Math.round(14 * scale), bold: true, color: theme.accent, fontFace: "Calibri", fit: "shrink",
+        x: 0.5, y, w: contentW, h: headH, fontSize: 14, bold: true, color: RED, fontFace: "Calibri", fit: "shrink",
       });
       slide.addText(s.description, {
-        x: 0.5, y: y + headH, w: contentW, h: descH, fontSize: Math.round(12 * scale), color: theme.dark, fontFace: "Calibri", fit: "shrink",
+        x: 0.5, y: y + headH, w: contentW, h: descH, fontSize: 12, color: DARK, fontFace: "Calibri", fit: "shrink",
       });
       y += perSection;
     });
@@ -148,47 +156,41 @@ function renderContent(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | n
 
   if (hasBullets) {
     const bulletsH = Math.max(0.4, CONTENT_BOTTOM - y);
-    const fontSize = Math.round((spec.bullets!.length > 4 ? 12 : 13) * scale);
+    const fontSize = spec.bullets!.length > 4 ? 12 : 13;
     slide.addText(
-      spec.bullets!.map((b) => ({ text: b, options: { bullet: { code: "25A0" }, color: theme.dark } })),
+      spec.bullets!.map((b) => ({ text: b, options: { bullet: { code: "25A0" }, color: DARK } })),
       { x: 0.5, y, w: contentW, h: bulletsH, fontSize, fontFace: "Calibri", paraSpaceAfter: 6, fit: "shrink" },
     );
   }
 
-  addFooter(slide, logo, theme);
+  addFooter(slide, logo);
 }
 
-function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null, compact: boolean, theme: DeckTheme) {
-  const scale = compact ? 0.88 : 1;
+function renderTakeaway(slide: PptxGenJS.Slide, spec: SlideSpec, logo: string | null) {
   slide.background = { color: WHITE };
   slide.addText(spec.title, {
-    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: Math.round(26 * scale), bold: true, color: theme.primary, fontFace: "Calibri", fit: "shrink",
+    x: 0.5, y: 0.35, w: 9, h: 0.55, fontSize: 26, bold: true, color: GREEN, fontFace: "Calibri", fit: "shrink",
   });
   let y = 1.0;
   if (spec.subtitle) {
     slide.addText(spec.subtitle, {
-      x: 0.5, y, w: 9, h: 0.35, fontSize: Math.round(14 * scale), italic: true, color: theme.accent, fontFace: "Calibri", fit: "shrink",
+      x: 0.5, y, w: 9, h: 0.35, fontSize: 14, italic: true, color: RED, fontFace: "Calibri", fit: "shrink",
     });
     y += 0.45;
   }
   const items = spec.bullets ?? (spec.body ? [spec.body] : []);
   const h = Math.max(0.5, CONTENT_BOTTOM - y);
   slide.addText(
-    items.map((b) => ({ text: b, options: { bullet: { code: "2713" }, color: theme.dark } })),
-    { x: 0.5, y, w: 8.5, h, fontSize: Math.round(14 * scale), fontFace: "Calibri", paraSpaceAfter: 8, fit: "shrink" },
+    items.map((b) => ({ text: b, options: { bullet: { code: "2713" }, color: DARK } })),
+    { x: 0.5, y, w: 8.5, h, fontSize: 14, fontFace: "Calibri", paraSpaceAfter: 8, fit: "shrink" },
   );
-  addFooter(slide, logo, theme);
+  addFooter(slide, logo);
 }
 
-export async function exportDeckToPptx(
-  deck: SlideDeck,
-  options?: { density?: "comfortable" | "compact"; theme?: ThemeId },
-): Promise<void> {
+export async function exportDeckToPptx(deck: SlideDeck): Promise<void> {
   if (!deck || !Array.isArray(deck.slides) || deck.slides.length === 0) {
     throw new Error("There's nothing to export yet — generate a deck first.");
   }
-  const compact = options?.density === "compact";
-  const theme = getTheme(options?.theme);
 
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
@@ -206,10 +208,14 @@ export async function exportDeckToPptx(
   deck.slides.forEach((spec, i) => {
     try {
       const slide = pptx.addSlide();
-      if (spec.type === "title") renderTitle(slide, spec, deck, logo, theme);
-      else if (spec.type === "identification") renderIdentification(slide, deck, logo, theme);
-      else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo, compact, theme);
-      else renderContent(slide, spec, logo, compact, theme);
+      if (spec.type === "title") renderTitle(slide, spec, deck, logo);
+      else if (spec.type === "identification") renderIdentification(slide, deck, logo);
+      else if (spec.type === "takeaway") renderTakeaway(slide, spec, logo);
+      else renderContent(slide, spec, logo);
+      // Speaker notes are attached to every slide type — they carry the
+      // extra depth (explanations, examples, talking points) that the
+      // visible slide intentionally keeps sparse.
+      addNotes(slide, spec);
       rendered++;
     } catch (err) {
       // Skip the one bad slide rather than aborting the whole export.

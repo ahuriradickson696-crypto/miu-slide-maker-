@@ -2,7 +2,6 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { ensureSchema, sql } from "@/lib/db";
 import type { SlideDeck, SlideSpec } from "@/lib/slides.functions";
-import { authMiddleware } from "@/lib/auth.functions";
 
 // ========== Save ==========
 // Called right after a deck is generated so every deck (and every slide
@@ -18,7 +17,6 @@ const SlideSpecInput = z.object({
   sections: z
     .array(z.object({ heading: z.string(), description: z.string() }))
     .optional(),
-  speakerNotes: z.string().optional(),
 });
 
 const SaveDeckInput = z.object({
@@ -33,7 +31,6 @@ const SaveDeckInput = z.object({
 });
 
 export const saveDeck = createServerFn({ method: "POST" })
-  .middleware([authMiddleware])
   .inputValidator((data: unknown) => SaveDeckInput.parse(data))
   .handler(async ({ data }) => {
     await ensureSchema();
@@ -56,13 +53,12 @@ export const saveDeck = createServerFn({ method: "POST" })
     for (let i = 0; i < data.slides.length; i++) {
       const s = data.slides[i];
       await db`
-        INSERT INTO slides (deck_id, position, type, title, subtitle, body, bullets, sections, speaker_notes)
+        INSERT INTO slides (deck_id, position, type, title, subtitle, body, bullets, sections)
         VALUES (
           ${deckRow.id}, ${i}, ${s.type}, ${s.title},
           ${s.subtitle ?? null}, ${s.body ?? null},
           ${s.bullets ? JSON.stringify(s.bullets) : null},
-          ${s.sections ? JSON.stringify(s.sections) : null},
-          ${s.speakerNotes ?? null}
+          ${s.sections ? JSON.stringify(s.sections) : null}
         )
       `;
     }
@@ -73,9 +69,7 @@ export const saveDeck = createServerFn({ method: "POST" })
 // ========== List (history) ==========
 // Lightweight — no slide bodies, just enough to show a history list.
 
-export const listDecks = createServerFn({ method: "GET" })
-  .middleware([authMiddleware])
-  .handler(async () => {
+export const listDecks = createServerFn({ method: "GET" }).handler(async () => {
   await ensureSchema();
   const db = sql();
   const rows = await db`
@@ -100,7 +94,6 @@ export const listDecks = createServerFn({ method: "GET" })
 const GetDeckInput = z.object({ id: z.string().uuid() });
 
 export const getDeck = createServerFn({ method: "GET" })
-  .middleware([authMiddleware])
   .inputValidator((data: unknown) => GetDeckInput.parse(data))
   .handler(async ({ data }) => {
     await ensureSchema();
@@ -120,7 +113,6 @@ export const getDeck = createServerFn({ method: "GET" })
       body: s.body ?? undefined,
       bullets: s.bullets ?? undefined,
       sections: s.sections ?? undefined,
-      speakerNotes: s.speaker_notes ?? undefined,
     }));
 
     const deck: SlideDeck = {
@@ -142,7 +134,6 @@ export const getDeck = createServerFn({ method: "GET" })
 const DeleteDeckInput = z.object({ id: z.string().uuid() });
 
 export const deleteDeck = createServerFn({ method: "POST" })
-  .middleware([authMiddleware])
   .inputValidator((data: unknown) => DeleteDeckInput.parse(data))
   .handler(async ({ data }) => {
     await ensureSchema();
