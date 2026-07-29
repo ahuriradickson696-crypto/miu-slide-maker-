@@ -25,7 +25,7 @@ import {
   getDeck,
   deleteDeck,
 } from "@/lib/deck-storage.functions";
-import logo from "@/assets/miu-logo.jpg";
+import logo from "@/assets/miu-logo.png";
 
 type HistoryItem = {
   id: string;
@@ -162,16 +162,18 @@ function LoginScreen({
         style={{ background: "linear-gradient(160deg, #0F7A3A 0%, #0B5C2C 100%)" }}
       >
         <div className="flex items-center gap-3">
-          <img
-            src={logo}
-            alt="MIU logo"
-            className="h-10 w-10 rounded-md bg-white p-1"
-          />
-          <span className="font-semibold tracking-tight">
+          <div className="miu-logo-shine h-10 w-10 shrink-0 rounded-md bg-white p-1">
+            <img
+              src={logo}
+              alt="MIU logo"
+              className="miu-logo-animate h-full w-full object-contain"
+            />
+          </div>
+          <span className="font-semibold tracking-tight animate-in fade-in slide-in-from-left-4 duration-700 delay-150 fill-mode-both">
             Metropolitan International University
           </span>
         </div>
-        <div>
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300 fill-mode-both">
           <h1 className="text-3xl font-semibold leading-tight max-w-sm">
             Slide Studio — the university's lecture deck platform
           </h1>
@@ -190,11 +192,13 @@ function LoginScreen({
       <div className="flex-1 flex items-center justify-center px-6 py-12">
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center lg:items-start mb-8">
-            <img
-              src={logo}
-              alt="MIU logo"
-              className="h-12 w-12 rounded-lg bg-primary p-1 shadow lg:hidden mb-4"
-            />
+            <div className="miu-logo-shine h-12 w-12 rounded-lg bg-primary p-1 shadow lg:hidden mb-4">
+              <img
+                src={logo}
+                alt="MIU logo"
+                className="miu-logo-animate h-full w-full object-contain"
+              />
+            </div>
             <h2 className="text-2xl font-semibold text-foreground">
               Sign in
             </h2>
@@ -531,12 +535,14 @@ function StudioPageInner({
       {/* Header */}
       <header className="miu-gradient text-primary-foreground">
         <div className="mx-auto max-w-7xl px-6 py-5 flex items-center gap-4">
-          <img
-            src={logo}
-            alt="MIU logo"
-            className="h-14 w-14 rounded-xl bg-white p-1 shadow-lg"
-          />
-          <div className="flex-1">
+          <div className="miu-logo-shine miu-logo-ring h-14 w-14 shrink-0 rounded-xl bg-white p-1 shadow-lg">
+            <img
+              src={logo}
+              alt="MIU logo"
+              className="miu-logo-animate h-full w-full object-contain"
+            />
+          </div>
+          <div className="flex-1 animate-in fade-in slide-in-from-left-4 duration-700 delay-150 fill-mode-both">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
               Metropolitan International University
             </h1>
@@ -961,12 +967,12 @@ function Input({
 
 function EmptyState() {
   return (
-    <div className="rounded-2xl border-2 border-dashed p-10 text-center text-muted-foreground">
-      <FileText className="mx-auto h-10 w-10 text-primary/60" />
-      <h3 className="mt-3 font-semibold text-foreground">
+    <div className="rounded-2xl border-2 border-dashed p-10 text-center text-muted-foreground animate-in fade-in slide-in-from-bottom-4 duration-700 fill-mode-both">
+      <FileText className="mx-auto h-10 w-10 text-primary/60 animate-in zoom-in duration-500 delay-150 fill-mode-both" />
+      <h3 className="mt-3 font-semibold text-foreground animate-in fade-in duration-500 delay-300 fill-mode-both">
         Start with a topic on the left
       </h3>
-      <p className="mt-1 text-sm">
+      <p className="mt-1 text-sm animate-in fade-in duration-500 delay-500 fill-mode-both">
         We'll write the outline and export a MIU-branded PowerPoint you can
         present or edit.
       </p>
@@ -1041,18 +1047,23 @@ function SlideCard({
   const isTitle = spec.type === "title";
   const [notesOpen, setNotesOpen] = useState(false);
   return (
-    <div className="rounded-xl overflow-hidden border bg-card slide-shadow">
+    <div
+      className="rounded-xl overflow-hidden border bg-card slide-shadow animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-both hover:-translate-y-0.5 hover:shadow-lg transition-transform"
+      style={{ animationDelay: `${Math.min(index * 60, 480)}ms` }}
+    >
       <div
         className={`aspect-video relative overflow-hidden ${isTitle ? "text-white" : ""}`}
         style={{ background: isTitle ? "#0F7A3A" : "#ffffff" }}
       >
         {isTitle ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-            <img
-              src={logo}
-              alt=""
-              className="h-16 w-16 rounded-lg bg-white p-1 mb-3"
-            />
+            <div className="miu-logo-shine h-16 w-16 rounded-lg bg-white p-1 mb-3">
+              <img
+                src={logo}
+                alt=""
+                className="h-full w-full object-contain"
+              />
+            </div>
             <div className="text-[10px] font-bold tracking-wider">
               METROPOLITAN INTERNATIONAL UNIVERSITY
             </div>

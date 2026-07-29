@@ -1,6 +1,6 @@
 import PptxGenJS from "pptxgenjs";
 import type { SlideDeck, SlideSpec } from "./slides.functions";
-import logoAsset from "@/assets/miu-logo.jpg";
+import logoAsset from "@/assets/miu-logo.png";
 
 const GREEN = "0F7A3A";
 const RED = "C8102E";
