@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { generateDeck, type SlideDeck } from "@/lib/slides.functions";
 import { exportDeckToPptx } from "@/lib/pptx-export";
-import { login, logout, getAuthStatus } from "@/lib/auth.functions";
+import { login, signup, logout, getAuthStatus } from "@/lib/auth.functions";
 import {
   saveDeck,
   listDecks,
@@ -122,29 +122,47 @@ function LoginScreen({
 }: {
   onLoggedIn: (username: string) => void;
 }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  function switchMode(next: "signin" | "signup") {
+    setMode(next);
+    setError(null);
+    setPassword("");
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (submitting) return;
     setError(null);
+
     if (!username.trim() || !password) {
       setError("Enter your username and password.");
       return;
     }
+    if (mode === "signup" && password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+
     setSubmitting(true);
     try {
-      const res = await login({ data: { username, password } });
+      const res =
+        mode === "signin"
+          ? await login({ data: { username, password } })
+          : await signup({ data: { username, password } });
       onLoggedIn(res.username);
     } catch (e) {
       setError(
         e instanceof Error && e.message
           ? e.message
-          : "Sign-in failed. Check your credentials and try again.",
+          : mode === "signin"
+            ? "Sign-in failed. Check your credentials and try again."
+            : "Account creation failed. Please try again.",
       );
     } finally {
       setSubmitting(false);
@@ -162,24 +180,22 @@ function LoginScreen({
         style={{ background: "linear-gradient(160deg, #0F7A3A 0%, #0B5C2C 100%)" }}
       >
         <div className="flex items-center gap-3">
-          <div className="miu-logo-shine h-10 w-10 shrink-0 rounded-md bg-white p-1">
-            <img
-              src={logo}
-              alt="MIU logo"
-              className="miu-logo-animate h-full w-full object-contain"
-            />
-          </div>
-          <span className="font-semibold tracking-tight animate-in fade-in slide-in-from-left-4 duration-700 delay-150 fill-mode-both">
+          <img
+            src={logo}
+            alt="MIU logo"
+            className="h-10 w-10 rounded-md bg-white p-1 animate-miu-logo-intro animate-miu-logo-float"
+          />
+          <span className="font-semibold tracking-tight animate-miu-fade-up [animation-delay:200ms]">
             Metropolitan International University
           </span>
         </div>
-        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300 fill-mode-both">
-          <h1 className="text-3xl font-semibold leading-tight max-w-sm">
+        <div>
+          <h1 className="text-3xl font-semibold leading-tight max-w-sm animate-miu-fade-up [animation-delay:300ms]">
             Slide Studio — the university's lecture deck platform
           </h1>
-          <p className="mt-3 max-w-sm text-sm text-white/80">
-            Sign in with your MIU staff credentials to build, save, and
-            export branded lecture decks.
+          <p className="mt-3 max-w-sm text-sm text-white/80 animate-miu-fade-up [animation-delay:450ms]">
+            Every account is a real, password-protected login — sign in or
+            create one to build, save, and export branded lecture decks.
           </p>
         </div>
         <div className="text-xs text-white/60">
@@ -191,20 +207,46 @@ function LoginScreen({
       {/* Form panel — right */}
       <div className="flex-1 flex items-center justify-center px-6 py-12">
         <div className="w-full max-w-sm">
-          <div className="flex flex-col items-center lg:items-start mb-8">
-            <div className="miu-logo-shine h-12 w-12 rounded-lg bg-primary p-1 shadow lg:hidden mb-4">
-              <img
-                src={logo}
-                alt="MIU logo"
-                className="miu-logo-animate h-full w-full object-contain"
-              />
-            </div>
+          <div className="flex flex-col items-center lg:items-start mb-6">
+            <img
+              src={logo}
+              alt="MIU logo"
+              className="h-12 w-12 rounded-lg bg-primary p-1 shadow lg:hidden mb-4 animate-miu-logo-intro animate-miu-logo-float"
+            />
             <h2 className="text-2xl font-semibold text-foreground">
-              Sign in
+              {mode === "signin" ? "Sign in" : "Create your account"}
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Use your Metropolitan International University staff account.
+              {mode === "signin"
+                ? "Nobody reaches the studio without logging in first."
+                : "Pick a username and password to get started."}
             </p>
+          </div>
+
+          {/* Mode toggle */}
+          <div className="mb-6 grid grid-cols-2 rounded-lg border p-1 text-sm font-medium">
+            <button
+              type="button"
+              onClick={() => switchMode("signin")}
+              className={`rounded-md py-1.5 transition ${
+                mode === "signin"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode("signup")}
+              className={`rounded-md py-1.5 transition ${
+                mode === "signup"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Create account
+            </button>
           </div>
 
           <form onSubmit={handleSubmit} noValidate className="space-y-4">
@@ -251,11 +293,11 @@ function LoginScreen({
                   id="password"
                   name="password"
                   type={showPassword ? "text" : "password"}
-                  autoComplete="current-password"
+                  autoComplete={mode === "signin" ? "current-password" : "new-password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full rounded-md border border-input bg-background px-3 py-2.5 pr-10 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition"
-                  placeholder="Enter your password"
+                  placeholder={mode === "signin" ? "Enter your password" : "At least 8 characters"}
                 />
                 <button
                   type="button"
@@ -279,22 +321,48 @@ function LoginScreen({
             >
               {submitting ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" /> Signing in…
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {mode === "signin" ? "Signing in…" : "Creating account…"}
                 </>
-              ) : (
+              ) : mode === "signin" ? (
                 "Sign in"
+              ) : (
+                "Create account"
               )}
             </button>
           </form>
 
           <div className="mt-6 flex items-center gap-1.5 text-xs text-muted-foreground">
             <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-            Your connection to this site is authenticated and encrypted.
+            Passwords are salted and hashed — never stored in plain text.
           </div>
 
           <p className="mt-8 text-center lg:text-left text-xs text-muted-foreground">
-            Don't have an account? Contact your MIU system administrator for
-            access.
+            {mode === "signin" ? (
+              <>
+                Don't have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => switchMode("signup")}
+                  className="font-medium text-primary hover:underline"
+                >
+                  Create one
+                </button>
+                .
+              </>
+            ) : (
+              <>
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => switchMode("signin")}
+                  className="font-medium text-primary hover:underline"
+                >
+                  Sign in
+                </button>
+                .
+              </>
+            )}
           </p>
         </div>
       </div>
@@ -535,14 +603,12 @@ function StudioPageInner({
       {/* Header */}
       <header className="miu-gradient text-primary-foreground">
         <div className="mx-auto max-w-7xl px-6 py-5 flex items-center gap-4">
-          <div className="miu-logo-shine miu-logo-ring h-14 w-14 shrink-0 rounded-xl bg-white p-1 shadow-lg">
-            <img
-              src={logo}
-              alt="MIU logo"
-              className="miu-logo-animate h-full w-full object-contain"
-            />
-          </div>
-          <div className="flex-1 animate-in fade-in slide-in-from-left-4 duration-700 delay-150 fill-mode-both">
+          <img
+            src={logo}
+            alt="MIU logo"
+            className="h-14 w-14 rounded-xl bg-white p-1 shadow-lg"
+          />
+          <div className="flex-1">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
               Metropolitan International University
             </h1>
@@ -967,12 +1033,12 @@ function Input({
 
 function EmptyState() {
   return (
-    <div className="rounded-2xl border-2 border-dashed p-10 text-center text-muted-foreground animate-in fade-in slide-in-from-bottom-4 duration-700 fill-mode-both">
-      <FileText className="mx-auto h-10 w-10 text-primary/60 animate-in zoom-in duration-500 delay-150 fill-mode-both" />
-      <h3 className="mt-3 font-semibold text-foreground animate-in fade-in duration-500 delay-300 fill-mode-both">
+    <div className="rounded-2xl border-2 border-dashed p-10 text-center text-muted-foreground">
+      <FileText className="mx-auto h-10 w-10 text-primary/60" />
+      <h3 className="mt-3 font-semibold text-foreground">
         Start with a topic on the left
       </h3>
-      <p className="mt-1 text-sm animate-in fade-in duration-500 delay-500 fill-mode-both">
+      <p className="mt-1 text-sm">
         We'll write the outline and export a MIU-branded PowerPoint you can
         present or edit.
       </p>
@@ -1047,23 +1113,18 @@ function SlideCard({
   const isTitle = spec.type === "title";
   const [notesOpen, setNotesOpen] = useState(false);
   return (
-    <div
-      className="rounded-xl overflow-hidden border bg-card slide-shadow animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-both hover:-translate-y-0.5 hover:shadow-lg transition-transform"
-      style={{ animationDelay: `${Math.min(index * 60, 480)}ms` }}
-    >
+    <div className="rounded-xl overflow-hidden border bg-card slide-shadow">
       <div
         className={`aspect-video relative overflow-hidden ${isTitle ? "text-white" : ""}`}
         style={{ background: isTitle ? "#0F7A3A" : "#ffffff" }}
       >
         {isTitle ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-            <div className="miu-logo-shine h-16 w-16 rounded-lg bg-white p-1 mb-3">
-              <img
-                src={logo}
-                alt=""
-                className="h-full w-full object-contain"
-              />
-            </div>
+            <img
+              src={logo}
+              alt=""
+              className="h-16 w-16 rounded-lg bg-white p-1 mb-3"
+            />
             <div className="text-[10px] font-bold tracking-wider">
               METROPOLITAN INTERNATIONAL UNIVERSITY
             </div>
@@ -1077,6 +1138,16 @@ function SlideCard({
                   {p}
                 </span>
               ))}
+            </div>
+            <div className="absolute bottom-1 left-0 right-0 flex items-center gap-1 px-2">
+              <img
+                src={logo}
+                alt=""
+                className="h-3.5 w-3.5 rounded-sm shrink-0 object-contain bg-white/90 p-0.5"
+              />
+              <div className="text-[7px] text-white/80 truncate">
+                MIU • www.miu.ac.ug • Kampala • Mbarara • Kisoro
+              </div>
             </div>
           </div>
         ) : (
@@ -1111,8 +1182,15 @@ function SlideCard({
                 )}
               </div>
             </div>
-            <div className="text-[7px] text-slate-500 border-t pt-1 mt-1 truncate">
-              MIU • www.miu.ac.ug • Kampala • Mbarara • Kisoro
+            <div className="flex items-center gap-1 border-t pt-1 mt-1">
+              <img
+                src={logo}
+                alt=""
+                className="h-3.5 w-3.5 rounded-sm shrink-0 object-contain"
+              />
+              <div className="text-[7px] text-slate-500 truncate">
+                MIU • www.miu.ac.ug • Kampala • Mbarara • Kisoro
+              </div>
             </div>
           </div>
         )}

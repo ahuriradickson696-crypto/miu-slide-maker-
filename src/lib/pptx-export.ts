@@ -33,27 +33,37 @@ function addNotes(slide: PptxGenJS.Slide, spec: SlideSpec) {
   }
 }
 
-function addFooter(slide: PptxGenJS.Slide, logo: string | null) {
+function addFooter(slide: PptxGenJS.Slide, logo: string | null, onDark = false) {
+  // Every slide — including the title slide — carries the crest logo plus
+  // the university name/contact strip in this same footer band, so the
+  // branding is consistent across the whole deck.
   if (logo) {
-    slide.addImage({ data: logo, x: 0.35, y: 5.05, w: 0.45, h: 0.45 });
+    slide.addImage({
+      data: logo,
+      x: 0.35,
+      y: 5.02,
+      w: 0.48,
+      h: 0.48,
+      rounding: true,
+    });
   }
   slide.addText("Metropolitan International University", {
-    x: 0.85,
+    x: 0.88,
     y: 5.05,
     w: 3.2,
     h: 0.22,
     fontSize: 10,
     bold: true,
-    color: GREEN,
+    color: onDark ? WHITE : GREEN,
     fontFace: "Calibri",
   });
   slide.addText("www.miu.ac.ug  |  info@miu.ac.ug  |  +256 772 561 957  |  Kampala • Mbarara • Kisoro Campuses", {
-    x: 0.85,
+    x: 0.88,
     y: 5.27,
     w: 8.5,
     h: 0.22,
     fontSize: 9,
-    color: MUTED,
+    color: onDark ? "E5E7EB" : MUTED,
     fontFace: "Calibri",
   });
 }
@@ -86,6 +96,7 @@ function renderTitle(slide: PptxGenJS.Slide, spec: SlideSpec, deck: SlideDeck, l
       fontSize: 12, bold: true, color: WHITE, align: "center", valign: "middle", fontFace: "Calibri", fit: "shrink",
     });
   });
+  addFooter(slide, logo, true);
 }
 
 function renderIdentification(slide: PptxGenJS.Slide, deck: SlideDeck, logo: string | null) {

@@ -41,6 +41,15 @@ export function ensureSchema(): Promise<void> {
     schemaReady = (async () => {
       const db = sql();
       await db`
+        CREATE TABLE IF NOT EXISTS users (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          password_salt TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `;
+      await db`
         CREATE TABLE IF NOT EXISTS decks (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           topic TEXT NOT NULL DEFAULT '',
