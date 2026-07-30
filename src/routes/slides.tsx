@@ -76,6 +76,7 @@ import {
 } from "@/lib/auth.functions";
 import { getPublicConfigStatus } from "@/lib/config-status.functions";
 import { t, LOCALE_LABELS, type Locale } from "@/lib/i18n";
+import { AuthGate } from "@/components/AuthGate";
 import {
   saveDeck,
   listDecks,
@@ -187,7 +188,9 @@ function useFocusTrap(active: boolean, ref: React.RefObject<HTMLElement | null>)
 function StudioPage() {
   return (
     <ErrorBoundary>
-      <StudioPageInner />
+      <AuthGate serviceName="Slide Studio">
+        <StudioPageInner />
+      </AuthGate>
     </ErrorBoundary>
   );
 }
@@ -523,10 +526,11 @@ function StudioPageInner() {
     } catch (e) {
       console.error(e);
     }
-    setUser(null);
-    setHistory([]);
-    setAuthMenuOpen(false);
     toast.success("Signed out");
+    // Slide Studio is gated by <AuthGate>, which only checks auth state on
+    // mount — clearing local state here wouldn't re-lock the page, since
+    // AuthGate itself wouldn't know. A full reload forces it to re-check.
+    window.location.href = "/";
   }
 
   // Live rate-limit countdown. When Gemini's free tier (10 req/min, 250/day)

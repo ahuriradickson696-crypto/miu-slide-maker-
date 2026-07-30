@@ -27,6 +27,8 @@ import type { SlideDeck } from "@/lib/slides.functions";
 import { exportLectureNotesToPdf } from "@/lib/lecture-notes-pdf";
 import { downloadLectureNotesMarkdown } from "@/lib/lecture-notes-markdown";
 import { MIU_FACTS } from "@/lib/miu-facts";
+import { getPublicConfigStatus } from "@/lib/config-status.functions";
+import { AuthGate } from "@/components/AuthGate";
 import logo from "@/assets/miu-logo.jpg";
 
 export const Route = createFileRoute("/lecture-notes/$deckId")({
@@ -45,6 +47,14 @@ function slugify(text: string, i: number): string {
 }
 
 function LectureNotesPage() {
+  return (
+    <AuthGate serviceName="Lecture Notes">
+      <LectureNotesPageInner />
+    </AuthGate>
+  );
+}
+
+function LectureNotesPageInner() {
   const { deckId } = Route.useParams();
 
   const [deck, setDeck] = useState<SlideDeck | null>(null);
@@ -54,8 +64,14 @@ function LectureNotesPage() {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  const [configStatus, setConfigStatus] = useState<{ sharedApiKey: boolean } | null>(null);
   const [tocOpen, setTocOpen] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+
+  // Same key story as Slide Studio — a personal key saved there (localStorage,
+  // shared key name) takes priority, otherwise fall back to whatever the
+  // admin has configured server-side. Notes never asks for its own key.
+  const hasApiAccess = !!apiKey.trim() || !!configStatus?.sharedApiKey;
 
   useEffect(() => {
     try {
@@ -63,6 +79,9 @@ function LectureNotesPage() {
     } catch {
       // ignore — private browsing etc.
     }
+    getPublicConfigStatus()
+      .then(setConfigStatus)
+      .catch(() => setConfigStatus(null));
   }, []);
 
   useEffect(() => {
@@ -88,7 +107,7 @@ function LectureNotesPage() {
   }, [deckId]);
 
   async function handleGenerate() {
-    if (!apiKey.trim()) {
+    if (!hasApiAccess) {
       toast.error("Add your Gemini API key in Slide Studio first, then come back here.");
       return;
     }
@@ -256,6 +275,13 @@ function LectureNotesPage() {
                 <p className="mt-4 flex items-start gap-1.5 rounded-lg bg-destructive/10 p-2.5 text-left text-[11px] text-destructive leading-relaxed">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                   {genError}
+                </p>
+              )}
+
+              {!hasApiAccess && !genError && (
+                <p className="mt-4 text-left text-[11px] text-muted-foreground leading-relaxed">
+                  Uses the same Gemini API key as Slide Studio — add one there (Settings → API key) and it'll
+                  work here automatically, no separate key needed.
                 </p>
               )}
 
