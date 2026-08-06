@@ -9,10 +9,14 @@ This is a small suite of pages sharing one deployment and one database:
 | `/slides` | Slide Studio — the AI slide-deck generator (this used to live at `/`) |
 | `/notes` | Lecture Notes library — every lecture-notes document you've generated |
 | `/lecture-notes/:deckId` | A single lecture-notes document, generated from a specific deck |
+| `/curriculum` | Curriculum Import — upload a full program curriculum document (PDF/DOCX/TXT) to extract its academic hierarchy |
+| `/curriculum/:curriculumId` | A single curriculum's outline, with per-semester detailed topic notes generated on demand |
 | `/admin` | Admin control center — usage stats, user management, moderation, system/API status |
 | `/reset-password` | Destination for emailed password-reset links |
 
-Each module has its own dedicated database table(s) (`decks`/`slides` for Slide Studio, `lecture_notes` for Lecture Notes) rather than sharing a generic table — as more modules are added later (quizzes, flashcards, etc.), each gets its own table too.
+Each module has its own dedicated database table(s) (`decks`/`slides` for Slide Studio, `lecture_notes` for Lecture Notes, `curricula`/`curriculum_semester_notes` for Curriculum Import) rather than sharing a generic table — as more modules are added later (quizzes, flashcards, etc.), each gets its own table too.
+
+**Curriculum Import upload limit:** documents are capped at 4MB (a TanStack Start server function's request body size). PDF and DOCX text is extracted server-side (via `unpdf` and `mammoth`); scanned/image-only PDFs aren't supported since there's no OCR. Very large documents have their extracted text truncated at ~200,000 characters before being sent to Gemini for structure extraction.
 
 ## 1. Get a Gemini API key
 1. Go to https://aistudio.google.com/apikey
@@ -20,6 +24,12 @@ Each module has its own dedicated database table(s) (`decks`/`slides` for Slide 
 3. Copy the key — you'll paste it into Vercel, not into any file
 
 By default, each person pastes their own key into the app (stored only in their browser). If you'd rather offer the tool without requiring that, set `GEMINI_API_KEY` as a Vercel environment variable (Production/Preview/Development) — the app falls back to this shared key automatically whenever someone hasn't pasted their own. Their own key, if entered, always takes priority (so it counts against their personal quota, not the shared one). The admin panel's System tab shows whether a shared key is configured, without ever displaying its value.
+
+**Optional: Groq fallback.** If Gemini is rate-limited or erroring on both its models, generation just fails by default. Set `GROQ_API_KEY` (free tier at https://console.groq.com) and the app automatically retries once via Groq (`llama-3.3-70b-versatile`) before giving up — same generic error message either way if that also fails. Groq's JSON mode doesn't enforce a strict schema the way Gemini's does, so its output goes through the same validation/clamping every AI response already gets, rather than being trusted directly. This is purely a resilience fallback, not a quality upgrade — Gemini is always tried first.
+
+**Optional: DeepSeek fallback (second tier).** Set `DEEPSEEK_API_KEY` and it's tried after Groq, if Groq also fails or isn't configured — same untrusted-JSON handling as Groq. The full chain, in order: Gemini (2 models) → Groq → DeepSeek → give up.
+
+⚠️ As with the Gemini key, never commit a real Groq or DeepSeek key to Git — set them only in Vercel's Environment Variables.
 
 ⚠️ **Never commit your real key to Git.** `.env` is already in `.gitignore`.
 
@@ -55,7 +65,7 @@ Saved decks (the History panel) are stored in Postgres via [Neon](https://neon.t
 
 ## 4. Verify
 - Open the deployed URL
-- Try generating a deck — this calls `generateDeck` (text) and `generateIllustration` (images), both of which read `process.env.GEMINI_API_KEY` **server-side only** (it's never sent to the browser)
+- Try generating a deck — this calls `generateDeck`, which reads `process.env.GEMINI_API_KEY` **server-side only** (it's never sent to the browser)
 - If you see "Missing GEMINI_API_KEY", double check the env var is set for the right environment and redeploy
 - Click **History** in the header — the deck you just generated should appear there. If it's empty and the deck generated fine, double-check `DATABASE_URL` is set
 
@@ -151,7 +161,39 @@ Get both from the Upstash console → your database → **REST API** tab (use th
 
 ⚠️ Treat the REST token like any other secret — don't commit it to Git or paste it somewhere public. If it's ever exposed, regenerate it from the Upstash console.
 
-## 7. Running tests
+## 7. Optional: R2 file storage & S3-compatible backups
+
+Both of these use the same generic S3-compatible client (`src/lib/object-storage.ts`) pointed at different buckets — Cloudflare R2 for one, and whatever backup provider you choose for the other (Backblaze B2, AWS S3, or anything else that speaks the S3 API).
+
+### 7a. R2 — preserves the original curriculum file
+Without this, Curriculum Import still works fully — documents are parsed into their structure immediately on upload, and nothing about generation depends on R2. All you lose is the "Download original file" button on a curriculum's page.
+
+**Important:** R2's S3-compatible API needs a proper access key ID + secret access key pair — a single Cloudflare API key (the kind used for Cloudflare's own REST API) is not sufficient for this. Generate a dedicated R2 API token:
+1. Cloudflare dashboard → R2 → **Manage API Tokens** → Create API Token
+2. Give it Object Read & Write permission on the bucket you want to use
+3. Copy the **Access Key ID** and **Secret Access Key** it gives you (shown once)
+
+| Key | Value |
+|---|---|
+| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID (dashboard sidebar) |
+| `CLOUDFLARE_R2_ACCESS_KEY_ID` | From the R2 API token you just created |
+| `CLOUDFLARE_R2_SECRET_ACCESS_KEY` | From the same token |
+| `CLOUDFLARE_R2_BUCKET` | The bucket name |
+
+### 7b. Backups — admin-triggered data dump
+Without this, the app works the same — this only adds a manual "Backup now" button in `/admin` → System. When configured, it dumps decks, slides, lecture notes, curricula, and non-sensitive user fields (never password hashes) as one timestamped JSON file to your bucket.
+
+| Key | Value |
+|---|---|
+| `BACKUP_STORAGE_ENDPOINT` | Your provider's S3-compatible endpoint hostname, e.g. `s3.eu-central-1.backblazeb2.com` |
+| `BACKUP_STORAGE_ACCESS_KEY_ID` | Access key ID for that bucket |
+| `BACKUP_STORAGE_SECRET_ACCESS_KEY` | Secret access key for that bucket |
+| `BACKUP_STORAGE_BUCKET` | The bucket name |
+| `BACKUP_STORAGE_REGION` | Optional — defaults to `us-east-1`, override if your provider needs a specific region string |
+
+⚠️ Same rule as every other credential in this file: real values go in Vercel's Environment Variables only, never in a committed file.
+
+## 8. Running tests
 ```bash
 npm test
 ```
