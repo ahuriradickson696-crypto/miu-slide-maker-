@@ -12,9 +12,11 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as SlidesRouteImport } from './routes/slides'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as NotesRouteImport } from './routes/notes'
+import { Route as CurriculumRouteImport } from './routes/curriculum'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LectureNotesDeckIdRouteImport } from './routes/lecture-notes.$deckId'
+import { Route as CurriculumCurriculumIdRouteImport } from './routes/curriculum.$curriculumId'
 
 const SlidesRoute = SlidesRouteImport.update({
   id: '/slides',
@@ -29,6 +31,11 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
 const NotesRoute = NotesRouteImport.update({
   id: '/notes',
   path: '/notes',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CurriculumRoute = CurriculumRouteImport.update({
+  id: '/curriculum',
+  path: '/curriculum',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -46,30 +53,41 @@ const LectureNotesDeckIdRoute = LectureNotesDeckIdRouteImport.update({
   path: '/lecture-notes/$deckId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CurriculumCurriculumIdRoute = CurriculumCurriculumIdRouteImport.update({
+  id: '/$curriculumId',
+  path: '/$curriculumId',
+  getParentRoute: () => CurriculumRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/curriculum': typeof CurriculumRouteWithChildren
   '/notes': typeof NotesRoute
   '/reset-password': typeof ResetPasswordRoute
   '/slides': typeof SlidesRoute
+  '/curriculum/$curriculumId': typeof CurriculumCurriculumIdRoute
   '/lecture-notes/$deckId': typeof LectureNotesDeckIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/curriculum': typeof CurriculumRouteWithChildren
   '/notes': typeof NotesRoute
   '/reset-password': typeof ResetPasswordRoute
   '/slides': typeof SlidesRoute
+  '/curriculum/$curriculumId': typeof CurriculumCurriculumIdRoute
   '/lecture-notes/$deckId': typeof LectureNotesDeckIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/curriculum': typeof CurriculumRouteWithChildren
   '/notes': typeof NotesRoute
   '/reset-password': typeof ResetPasswordRoute
   '/slides': typeof SlidesRoute
+  '/curriculum/$curriculumId': typeof CurriculumCurriculumIdRoute
   '/lecture-notes/$deckId': typeof LectureNotesDeckIdRoute
 }
 export interface FileRouteTypes {
@@ -77,31 +95,38 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/admin'
+    | '/curriculum'
     | '/notes'
     | '/reset-password'
     | '/slides'
+    | '/curriculum/$curriculumId'
     | '/lecture-notes/$deckId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/admin'
+    | '/curriculum'
     | '/notes'
     | '/reset-password'
     | '/slides'
+    | '/curriculum/$curriculumId'
     | '/lecture-notes/$deckId'
   id:
     | '__root__'
     | '/'
     | '/admin'
+    | '/curriculum'
     | '/notes'
     | '/reset-password'
     | '/slides'
+    | '/curriculum/$curriculumId'
     | '/lecture-notes/$deckId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
+  CurriculumRoute: typeof CurriculumRouteWithChildren
   NotesRoute: typeof NotesRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   SlidesRoute: typeof SlidesRoute
@@ -131,6 +156,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NotesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/curriculum': {
+      id: '/curriculum'
+      path: '/curriculum'
+      fullPath: '/curriculum'
+      preLoaderRoute: typeof CurriculumRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/admin': {
       id: '/admin'
       path: '/admin'
@@ -152,12 +184,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LectureNotesDeckIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/curriculum/$curriculumId': {
+      id: '/curriculum/$curriculumId'
+      path: '/$curriculumId'
+      fullPath: '/curriculum/$curriculumId'
+      preLoaderRoute: typeof CurriculumCurriculumIdRouteImport
+      parentRoute: typeof CurriculumRoute
+    }
   }
 }
+
+interface CurriculumRouteChildren {
+  CurriculumCurriculumIdRoute: typeof CurriculumCurriculumIdRoute
+}
+
+const CurriculumRouteChildren: CurriculumRouteChildren = {
+  CurriculumCurriculumIdRoute: CurriculumCurriculumIdRoute,
+}
+
+const CurriculumRouteWithChildren = CurriculumRoute._addFileChildren(
+  CurriculumRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
+  CurriculumRoute: CurriculumRouteWithChildren,
   NotesRoute: NotesRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   SlidesRoute: SlidesRoute,

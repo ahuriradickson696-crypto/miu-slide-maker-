@@ -115,27 +115,31 @@ html[data-font-scale="lg"] { font-size: 18px; }
 
   /* Hide everything by default, then explicitly re-show whichever
      printable region is on the page — the slide deck grid on the Slide
-     Studio page, or the lecture-notes document on its own page. Only one
-     of these two ever exists in the DOM at once, so combining them here
-     is safe. */
+     Studio page, the lecture-notes document, or the curriculum semester
+     document. Only one of these ever exists in the DOM at once, so
+     combining them here is safe. */
   body * {
     visibility: hidden;
   }
   #printable-deck,
   #printable-deck *,
   #lecture-notes-doc,
-  #lecture-notes-doc * {
+  #lecture-notes-doc *,
+  #curriculum-semester-doc,
+  #curriculum-semester-doc * {
     visibility: visible;
   }
   #printable-deck,
-  #lecture-notes-doc {
+  #lecture-notes-doc,
+  #curriculum-semester-doc {
     position: absolute;
     inset: 0;
     display: block !important;
     margin: 0;
     padding: 0;
   }
-  #lecture-notes-doc {
+  #lecture-notes-doc,
+  #curriculum-semester-doc {
     border: none !important;
     box-shadow: none !important;
     border-radius: 0 !important;
