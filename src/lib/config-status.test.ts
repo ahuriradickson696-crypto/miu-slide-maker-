@@ -10,6 +10,16 @@ const ENV_KEYS = [
   "ADMIN_EMAILS",
   "RESEND_API_KEY",
   "GEMINI_API_KEY",
+  "GROQ_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_R2_ACCESS_KEY_ID",
+  "CLOUDFLARE_R2_SECRET_ACCESS_KEY",
+  "CLOUDFLARE_R2_BUCKET",
+  "BACKUP_STORAGE_ENDPOINT",
+  "BACKUP_STORAGE_ACCESS_KEY_ID",
+  "BACKUP_STORAGE_SECRET_ACCESS_KEY",
+  "BACKUP_STORAGE_BUCKET",
 ] as const;
 
 const originalEnv: Record<string, string | undefined> = {};
@@ -40,7 +50,41 @@ describe("getConfigStatus", () => {
       email: false,
       adminDashboard: false,
       sharedApiKey: false,
+      groqFallback: false,
+      deepseekFallback: false,
+      r2Storage: false,
+      backupStorage: false,
     });
+  });
+
+  it("deepseekFallback is configured whenever DEEPSEEK_API_KEY is set", () => {
+    expect(getConfigStatus().deepseekFallback).toBe(false);
+    process.env.DEEPSEEK_API_KEY = "sk-test-key";
+    expect(getConfigStatus().deepseekFallback).toBe(true);
+  });
+
+  it("r2Storage requires all four R2 vars to count as configured", () => {
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acct";
+    process.env.CLOUDFLARE_R2_ACCESS_KEY_ID = "key-id";
+    process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY = "secret";
+    expect(getConfigStatus().r2Storage).toBe(false);
+    process.env.CLOUDFLARE_R2_BUCKET = "bucket";
+    expect(getConfigStatus().r2Storage).toBe(true);
+  });
+
+  it("backupStorage requires all four backup vars to count as configured", () => {
+    process.env.BACKUP_STORAGE_ENDPOINT = "s3.example.com";
+    process.env.BACKUP_STORAGE_ACCESS_KEY_ID = "key-id";
+    process.env.BACKUP_STORAGE_SECRET_ACCESS_KEY = "secret";
+    expect(getConfigStatus().backupStorage).toBe(false);
+    process.env.BACKUP_STORAGE_BUCKET = "bucket";
+    expect(getConfigStatus().backupStorage).toBe(true);
+  });
+
+  it("groqFallback is configured whenever GROQ_API_KEY is set", () => {
+    expect(getConfigStatus().groqFallback).toBe(false);
+    process.env.GROQ_API_KEY = "gsk_test_key";
+    expect(getConfigStatus().groqFallback).toBe(true);
   });
 
   it("sharedApiKey is configured whenever GEMINI_API_KEY is set", () => {

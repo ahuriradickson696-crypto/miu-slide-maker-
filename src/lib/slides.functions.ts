@@ -3,6 +3,8 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { ensureSchema, sql } from "@/lib/db";
 import { redis } from "@/lib/redis";
+import { groqConfigured, callGroqJSON } from "@/lib/groq-fallback";
+import { deepseekConfigured, callDeepSeekJSON } from "@/lib/deepseek-fallback";
 
 // ✅ FIXED VERSION — July 2026
 // - Uses ONLY currently-live models (gemini-1.5-*, gemini-pro, gemini-2.0-* are
@@ -515,11 +517,12 @@ async function callGeminiModel(
   prompt: string,
   modelName: string,
   schema: Record<string, unknown> = deckSchema,
+  options?: { maxOutputTokens?: number; timeoutMs?: number },
 ): Promise<Record<string, unknown>> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options?.timeoutMs ?? REQUEST_TIMEOUT_MS);
 
   try {
     const res = await fetch(url, {
@@ -535,7 +538,7 @@ async function callGeminiModel(
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.7,
-          maxOutputTokens: 8192,
+          maxOutputTokens: options?.maxOutputTokens ?? 8192,
           responseMimeType: "application/json",
           responseSchema: schema,
         },
@@ -662,6 +665,7 @@ export async function callGeminiWithRetry(
   apiKey: string,
   prompt: string,
   schema: Record<string, unknown> = deckSchema,
+  options?: { maxOutputTokens?: number; timeoutMs?: number },
 ): Promise<Record<string, unknown>> {
   const models = [PRIMARY_MODEL, FALLBACK_MODEL];
   let lastError: GeminiError | Error | null = null;
@@ -672,7 +676,7 @@ export async function callGeminiWithRetry(
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return await callGeminiModel(apiKey, prompt, model, schema);
+        return await callGeminiModel(apiKey, prompt, model, schema, options);
       } catch (err) {
         lastError = err as Error;
         const code = err instanceof GeminiError ? err.code : "UNKNOWN";
@@ -695,6 +699,46 @@ export async function callGeminiWithRetry(
         }
         break; // used our one retry on this model — move to next
       }
+    }
+  }
+
+  // Last resort: Gemini (both models, with retries) is genuinely
+  // unavailable — either rate-limited or erroring. If an admin has
+  // configured a Groq fallback key, try it before giving up. Groq's JSON
+  // mode doesn't enforce a schema the way Gemini's does, so this result
+  // goes through the exact same clamp/validation the caller already
+  // applies to Gemini's output — treated as untrusted either way.
+  if (groqConfigured()) {
+    try {
+      logEvent("groq_fallback_attempt", {
+        reason: rateLimitRetryAfter !== null ? "gemini_rate_limited" : "gemini_failed",
+      });
+      const result = await callGroqJSON(prompt, options);
+      logEvent("groq_fallback_success", {});
+      return result;
+    } catch (groqErr) {
+      logEvent("groq_fallback_failed", {
+        message: groqErr instanceof Error ? groqErr.message : "unknown",
+      });
+      // fall through to DeepSeek (if configured), then the original Gemini error
+    }
+  }
+
+  // Second-tier fallback: DeepSeek, tried after Groq fails or isn't
+  // configured. Same untrusted-output handling as Groq above.
+  if (deepseekConfigured()) {
+    try {
+      logEvent("deepseek_fallback_attempt", {
+        reason: rateLimitRetryAfter !== null ? "gemini_rate_limited" : "gemini_failed",
+      });
+      const result = await callDeepSeekJSON(prompt, options);
+      logEvent("deepseek_fallback_success", {});
+      return result;
+    } catch (deepseekErr) {
+      logEvent("deepseek_fallback_failed", {
+        message: deepseekErr instanceof Error ? deepseekErr.message : "unknown",
+      });
+      // fall through to the original Gemini error below
     }
   }
 

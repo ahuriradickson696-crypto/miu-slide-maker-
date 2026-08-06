@@ -7,6 +7,8 @@
 // (and, transitively, the "config missing" banner in the UI) agree on one
 // definition of "configured" instead of duplicating the same env reads.
 
+import { storageConfigured } from "@/lib/object-storage";
+
 export type ConfigStatus = {
   database: boolean;
   redis: boolean;
@@ -16,6 +18,10 @@ export type ConfigStatus = {
   email: boolean;
   adminDashboard: boolean;
   sharedApiKey: boolean;
+  groqFallback: boolean;
+  deepseekFallback: boolean;
+  r2Storage: boolean;
+  backupStorage: boolean;
 };
 
 export function getConfigStatus(): ConfigStatus {
@@ -27,7 +33,24 @@ export function getConfigStatus(): ConfigStatus {
   const email = !!process.env.RESEND_API_KEY;
   const adminDashboard = !!(process.env.ADMIN_EMAILS && database);
   const sharedApiKey = !!process.env.GEMINI_API_KEY;
-  return { database, redis, session, googleAuth, passwordAuth, email, adminDashboard, sharedApiKey };
+  const groqFallback = !!process.env.GROQ_API_KEY;
+  const deepseekFallback = !!process.env.DEEPSEEK_API_KEY;
+  const r2Storage = storageConfigured("r2");
+  const backupStorage = storageConfigured("backup");
+  return {
+    database,
+    redis,
+    session,
+    googleAuth,
+    passwordAuth,
+    email,
+    adminDashboard,
+    sharedApiKey,
+    groqFallback,
+    deepseekFallback,
+    r2Storage,
+    backupStorage,
+  };
 }
 
 // Called once at server startup (see instrumentation hook in start.ts).
@@ -65,6 +88,24 @@ export function logStartupConfigStatus() {
   }
   if (!status.adminDashboard) {
     notes.push("ADMIN_EMAILS not set (or DATABASE_URL missing) — the /admin usage dashboard will be unavailable.");
+  }
+  if (!status.groqFallback) {
+    notes.push(
+      "GROQ_API_KEY not set — no fallback provider if Gemini is rate-limited or down; generation will just fail in that case.",
+    );
+  }
+  if (!status.deepseekFallback) {
+    notes.push("DEEPSEEK_API_KEY not set — no second-tier fallback after Groq.");
+  }
+  if (!status.r2Storage) {
+    notes.push(
+      "R2 storage not fully configured (needs CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, CLOUDFLARE_R2_SECRET_ACCESS_KEY, CLOUDFLARE_R2_BUCKET) — original curriculum files won't be preserved for re-download.",
+    );
+  }
+  if (!status.backupStorage) {
+    notes.push(
+      "Backup storage not fully configured (needs BACKUP_STORAGE_ENDPOINT, BACKUP_STORAGE_ACCESS_KEY_ID, BACKUP_STORAGE_SECRET_ACCESS_KEY, BACKUP_STORAGE_BUCKET) — the admin 'Backup now' action will be unavailable.",
+    );
   }
 
   if (notes.length === 0) {

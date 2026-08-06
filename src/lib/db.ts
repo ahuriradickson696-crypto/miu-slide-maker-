@@ -176,6 +176,50 @@ export function ensureSchema(): Promise<void> {
       await db`
         CREATE INDEX IF NOT EXISTS idx_lecture_notes_created_at ON lecture_notes(created_at DESC)
       `;
+
+      // ========== Curriculum (its own dedicated module/tables) ==========
+      // A person uploads a heavy curriculum document (PDF/DOCX/TXT); we
+      // extract its academic hierarchy once (program → years → semesters →
+      // course units → topics) and store that structure here. Detailed
+      // topic-by-topic notes are generated later, one semester at a time
+      // (mirroring how a human would work through a large document), and
+      // stored separately per (curriculum, year, semester) so re-generating
+      // one semester never touches another.
+      await db`
+        CREATE TABLE IF NOT EXISTS curricula (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+          program_name TEXT NOT NULL DEFAULT '',
+          source_filename TEXT NOT NULL DEFAULT '',
+          structure JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `;
+      // Object key of the original uploaded file in R2 (if R2 storage is
+      // configured) — null when R2 isn't set up, or if the R2 upload
+      // failed (best-effort, never blocks the curriculum import itself).
+      await db`ALTER TABLE curricula ADD COLUMN IF NOT EXISTS source_file_key TEXT`;
+      await db`
+        CREATE INDEX IF NOT EXISTS idx_curricula_user_id ON curricula(user_id)
+      `;
+      await db`
+        CREATE INDEX IF NOT EXISTS idx_curricula_created_at ON curricula(created_at DESC)
+      `;
+      await db`
+        CREATE TABLE IF NOT EXISTS curriculum_semester_notes (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          curriculum_id UUID NOT NULL REFERENCES curricula(id) ON DELETE CASCADE,
+          year_label TEXT NOT NULL,
+          semester_label TEXT NOT NULL,
+          topics JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (curriculum_id, year_label, semester_label)
+        )
+      `;
+      await db`
+        CREATE INDEX IF NOT EXISTS idx_curriculum_notes_curriculum_id ON curriculum_semester_notes(curriculum_id)
+      `;
     })();
   }
   return schemaReady;

@@ -4,6 +4,7 @@ import { ensureSchema, sql } from "@/lib/db";
 import { readSessionUser } from "@/lib/auth.functions";
 import { getConfigStatus } from "@/lib/config-status";
 import { isSeedAdminEmail } from "@/lib/admin-seed";
+import { storageConfigured, uploadObject } from "@/lib/object-storage";
 
 // ========== Shared authorization ==========
 // Every admin function in this file goes through this — DB-backed
@@ -253,3 +254,54 @@ export const adminDeleteLectureNotes = createServerFn({ method: "POST" })
     await db`DELETE FROM lecture_notes WHERE deck_id = ${data.deckId}`;
     return { ok: true };
   });
+
+// ========== Backups ==========
+// Dumps every module's data as one JSON file to whatever S3-compatible
+// storage is configured (Backblaze B2, AWS S3, etc. — see object-storage.ts).
+// Deliberately excludes password_hash and any other auth-sensitive column,
+// even though this is already admin-only — a leaked backup file should
+// still never contain anything that could sign someone in.
+
+export const backupConfigured = createServerFn({ method: "GET" }).handler(async () => {
+  await requireAdmin();
+  return { configured: storageConfigured("backup") };
+});
+
+export const adminTriggerBackup = createServerFn({ method: "POST" }).handler(async () => {
+  await requireAdmin();
+  if (!storageConfigured("backup")) {
+    throw new Error("Backup storage isn't configured — set BACKUP_STORAGE_ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY/BUCKET.");
+  }
+
+  await ensureSchema();
+  const db = sql();
+
+  const [users, decks, slides, lectureNotes, curricula, curriculumNotes] = await Promise.all([
+    db`SELECT id, google_sub, email, name, picture, email_verified, is_admin, created_at, last_login_at FROM users`,
+    db`SELECT * FROM decks`,
+    db`SELECT * FROM slides`,
+    db`SELECT * FROM lecture_notes`,
+    db`SELECT id, user_id, program_name, source_filename, source_file_key, structure, created_at FROM curricula`,
+    db`SELECT * FROM curriculum_semester_notes`,
+  ]);
+
+  const dump = {
+    exportedAt: new Date().toISOString(),
+    tables: { users, decks, slides, lectureNotes, curricula, curriculumNotes },
+  };
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const key = `miu-slide-studio-backup-${timestamp}.json`;
+  await uploadObject("backup", key, JSON.stringify(dump, null, 2), "application/json");
+
+  return {
+    ok: true,
+    key,
+    counts: {
+      users: users.length,
+      decks: decks.length,
+      lectureNotes: lectureNotes.length,
+      curricula: curricula.length,
+    },
+  };
+});
