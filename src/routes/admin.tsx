@@ -19,6 +19,7 @@ import {
   Zap,
   Check,
   X,
+  Database,
 } from "lucide-react";
 import {
   getUsageStats,
@@ -29,6 +30,7 @@ import {
   adminDeleteDeck,
   adminListLectureNotes,
   adminDeleteLectureNotes,
+  adminTriggerBackup,
 } from "@/lib/admin.functions";
 import { MIU_FACTS } from "@/lib/miu-facts";
 import logo from "@/assets/miu-logo.jpg";
@@ -599,6 +601,24 @@ function SystemTab() {
                 : "Set GEMINI_API_KEY in Vercel's Environment Variables so people don't each need their own key. Until then, everyone must paste their own (get one free at aistudio.google.com/apikey)."
             }
           />
+          <ConfigRow
+            ok={status.groqFallback}
+            label={status.groqFallback ? "Groq fallback is configured" : "No fallback provider configured"}
+            hint={
+              status.groqFallback
+                ? "Set via GROQ_API_KEY — automatically used as a last resort if Gemini is rate-limited or erroring on both models."
+                : "Set GROQ_API_KEY (free tier at console.groq.com) so generation doesn't just fail outright if Gemini is down or rate-limited."
+            }
+          />
+          <ConfigRow
+            ok={status.deepseekFallback}
+            label={status.deepseekFallback ? "DeepSeek fallback is configured" : "No second-tier fallback configured"}
+            hint={
+              status.deepseekFallback
+                ? "Set via DEEPSEEK_API_KEY — tried after Groq, if Groq also fails or isn't configured."
+                : "Set DEEPSEEK_API_KEY for a second fallback tier, tried after Groq."
+            }
+          />
         </div>
       </div>
 
@@ -639,6 +659,73 @@ function SystemTab() {
           />
         </div>
       </div>
+
+      <div>
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold mb-3">
+          <Database className="h-4 w-4 text-primary" /> Storage &amp; backups
+        </h2>
+        <div className="rounded-xl border bg-card divide-y">
+          <ConfigRow
+            ok={status.r2Storage}
+            label={status.r2Storage ? "R2 file storage is configured" : "R2 file storage not configured"}
+            hint={
+              status.r2Storage
+                ? "Original uploaded curriculum documents are preserved and downloadable from the curriculum page."
+                : "Set CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, CLOUDFLARE_R2_SECRET_ACCESS_KEY, and CLOUDFLARE_R2_BUCKET — note R2 needs a proper access key ID + secret pair (generate one from the R2 dashboard's 'Manage API Tokens'), a single Cloudflare API key alone won't authenticate S3-compatible requests."
+            }
+          />
+          <ConfigRow
+            ok={status.backupStorage}
+            label={status.backupStorage ? "Backup storage is configured" : "Backup storage not configured"}
+            hint={
+              status.backupStorage
+                ? "Decks, notes, curricula, and non-sensitive user fields (never password hashes) can be backed up on demand below."
+                : "Set BACKUP_STORAGE_ENDPOINT, BACKUP_STORAGE_ACCESS_KEY_ID, BACKUP_STORAGE_SECRET_ACCESS_KEY, and BACKUP_STORAGE_BUCKET (works with Backblaze B2, AWS S3, or any S3-compatible provider)."
+            }
+          />
+          {status.backupStorage && <BackupNowRow />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BackupNowRow() {
+  const [running, setRunning] = useState(false);
+  const [lastResult, setLastResult] = useState<string | null>(null);
+
+  async function handleBackup() {
+    setRunning(true);
+    setLastResult(null);
+    try {
+      const result = await adminTriggerBackup();
+      toast.success(`Backup saved (${result.counts.decks} decks, ${result.counts.curricula} curricula)`);
+      setLastResult(`Last backup: ${result.key}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Backup failed");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3 p-3">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Database className="h-3 w-3" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">Manual backup</p>
+        <p className="text-xs text-muted-foreground">{lastResult ?? "Dumps all data to your configured backup storage."}</p>
+      </div>
+      <button
+        type="button"
+        onClick={handleBackup}
+        disabled={running}
+        className="shrink-0 inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 transition disabled:opacity-50"
+      >
+        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Database className="h-3 w-3" />}
+        Backup now
+      </button>
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   ListChecks,
   Layers,
   GraduationCap,
+  UploadCloud,
 } from "lucide-react";
 import { checkIsAdmin, type SessionUser } from "@/lib/auth.functions";
 import { AuthGate } from "@/components/AuthGate";
@@ -127,6 +128,13 @@ function HomePage() {
               title="Lecture Notes"
               description="Turn any generated deck into a polished, printable lecture-notes document — full prose, key terms, learning outcomes, and takeaways."
               cta="Open Lecture Notes"
+            />
+            <FeatureCard
+              href="/curriculum"
+              icon={<UploadCloud className="h-6 w-6" />}
+              title="Curriculum Import"
+              description="Upload a full program curriculum (PDF, Word, or text) — it's parsed into its academic hierarchy, then generates complete, rigorous lecture notes for every topic, one semester at a time."
+              cta="Open Curriculum Import"
             />
             <ComingSoonCard
               icon={<ListChecks className="h-6 w-6" />}
